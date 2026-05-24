@@ -1,10 +1,31 @@
 # Project Progress — QF621 Pairs Trading (ML Clustering)
 
-**Last updated:** 2026-05-24 · **Status:** **Phase 2 COMPLETE — paper replicated.** PC core Sharpe 1.028 vs paper 1.01 ✅. Ready for Phase 2.5 (factor-beta extension) or Phase 3 (robustness cells).
+**Last updated:** 2026-05-25 · **Status:** **Phase 2 COMPLETE — paper replicated + published to GitHub.** PC core Sharpe 1.028 vs paper 1.01 ✅. Ready for Phase 2.5 (factor-beta extension).
 
 > Session handoff — **read this first to resume.** The project is a from-scratch
 > replication of **Rotondi & Russo (2025)** clustering-based pairs trading, plus a
 > **factor-beta clustering** extension, for the QF621 group project.
+
+## 🌐 GitHub repo (published 2026-05-24)
+
+- **URL:** https://github.com/Donking123/pairs-trading-ml
+- **Visibility:** PUBLIC (was originally private, flipped to public same day after audit)
+- **Working folder:** `~/Documents/repos/pairs-trading-ml/` — this is the folder wired to
+  GitHub (origin/main); commit + push from here going forward.
+- **Old working folder:** `~/Documents/Pairs Trading - Machine Learning/pairs-trading-ml/`
+  still exists with the `data/` cache (140MB, gitignored). Don't commit from there.
+- **License:** MIT (© 2026 Don)
+- **Author email on commits:** `Donkingyappy1@users.noreply.github.com` (privacy-preserving)
+
+### Collaborators
+| User | Status | Permission |
+|---|---|---|
+| `Donking123` (Don) | Owner | admin |
+| `deepakgarrepalli1998` | ✅ Accepted | write |
+| `santapris` | ⏳ Invited 2026-05-24 14:04 UTC | write (pending) |
+| `nglei1999` | ⏳ Invited 2026-05-24 15:03 UTC | write (pending) |
+
+Re-check: `gh api "/repos/Donking123/pairs-trading-ml/collaborators" --jq '.[].login'`
 
 ---
 
