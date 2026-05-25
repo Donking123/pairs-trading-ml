@@ -33,9 +33,9 @@ from config import (
 
 PAIRS_DIR = DATA_PROC / "pairs"
 
-MAX_PAIRS          = 5      # concentrate on top 5 pairs per window for signal strength
-ENTRY_ZSCORE       = 2.5    # raised from 2.0 to reduce overtrading
-ROLLING_WINDOW     = 10     # 10-day window (≈ 1.5× half-life of 7.3 days)
+MAX_PAIRS          = 20     # top 20 pairs per window (paper's natural SSD count ~22)
+ENTRY_ZSCORE       = 2.0    # paper default (was 2.5 — higher threshold was killing trade count)
+ROLLING_WINDOW     = 63     # 3-month window — filters noise better than 10d (paper uses 126d)
 COOLDOWN_DAYS      = 5      # min days between trades per pair
 
 
