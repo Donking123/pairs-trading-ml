@@ -20,7 +20,6 @@ import pandas as pd
 import numpy as np
 from sklearn.linear_model import RidgeCV
 from statsmodels.tsa.stattools import coint
-from joblib import Parallel, delayed
 from pathlib import Path
 from itertools import combinations
 from tqdm import tqdm
@@ -31,6 +30,7 @@ from config import (
     COINT_PVALUE_THRESHOLD,
     MIN_OBS_FRAC, FORMATION_DAYS,
     HALFLIFE_MIN_DAYS, HALFLIFE_MAX_DAYS,
+    MAX_CLUSTER_SIZE,
 )
 
 CLUSTER_DIR = DATA_PROC / "clusters"
@@ -146,24 +146,26 @@ def test_pair(
 # ── One window ────────────────────────────────────────────────────────────────
 def process_one_window(
     cluster_file: Path,
-    stock_returns: pd.DataFrame,
+    sr: pd.DataFrame,
 ) -> tuple[str, int, int]:
     """
     Tests all within-cluster pairs for one formation window.
     Returns (output_path, n_candidates, n_passing).
+
+    stock_returns is passed in (loaded once in __main__) rather than re-read
+    from disk each call — avoids 131x redundant parquet reads.
     """
     date_str = cluster_file.stem.replace("clusters_", "")
     f_start, f_end = date_str[:8], date_str[9:]
 
-    clusters = pd.read_parquet(cluster_file)
+    try:
+        clusters = pd.read_parquet(cluster_file)
+    except Exception as e:
+        print(f"  ⚠  Skipping corrupted cluster file: {cluster_file.name} ({e})")
+        return ("", 0, 0)
     clusters  = clusters[clusters["cluster_id"] >= 0]
     if clusters.empty:
         return ("", 0, 0)
-
-    # Re-strip tz and cast columns inside worker — these can change across
-    # joblib pickle/unpickle cycles on Mac (spawn-based multiprocessing)
-    sr = strip_tz(stock_returns.copy())
-    sr.columns = sr.columns.astype(int)
 
     ret_window = sr.loc[pd.Timestamp(f_start):pd.Timestamp(f_end)]
     if ret_window.empty:
@@ -184,6 +186,8 @@ def process_one_window(
         ]
         if len(in_cluster) < 2:
             continue
+        if len(in_cluster) > MAX_CLUSTER_SIZE:
+            continue   # skip giant catch-all clusters
 
         for pa, pb in combinations(in_cluster, 2):
             n_candidates += 1
@@ -202,11 +206,6 @@ def process_one_window(
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    stock_returns = strip_tz(pd.read_parquet(DATA_RAW / "stock_returns.parquet"))
-    # Cast to standard float64 — parquet may store as nullable Float64Dtype
-    # which causes TypeError in sklearn and numpy operations downstream
-    stock_returns = stock_returns.astype("float64")
-
     cluster_files = sorted(CLUSTER_DIR.glob("clusters_*.parquet"))
     if not cluster_files:
         raise FileNotFoundError(
@@ -214,16 +213,20 @@ if __name__ == "__main__":
         )
 
     print(f"Testing cointegration for {len(cluster_files)} windows  "
-          f"(p < {COINT_PVALUE_THRESHOLD})…")
-    print(f"  Hedge ratio estimation: RidgeCV")
-    print(f"  Running serially for Mac reliability (n_jobs=1)\n")
+          f"(p < {COINT_PVALUE_THRESHOLD}, max cluster size = {MAX_CLUSTER_SIZE})…")
+    print(f"  Hedge ratio estimation: RidgeCV\n")
 
-    # Serial execution — Mac spawn-based joblib silently swallows exceptions
-    # in parallel workers. Once confirmed working, n_jobs=1 can be raised.
-    outputs = Parallel(n_jobs=1)(
-        delayed(process_one_window)(cf, stock_returns)
-        for cf in tqdm(cluster_files, desc="  Windows")
-    )
+    # Load stock returns once — passed into each window call rather than
+    # re-read from disk 131 times.
+    print("Loading stock returns…")
+    sr = pd.read_parquet(DATA_RAW / "stock_returns.parquet").astype("float64")
+    sr = strip_tz(sr)
+    sr.columns = sr.columns.astype(int)
+    print(f"  → {sr.shape[1]} stocks × {sr.shape[0]} days loaded\n")
+
+    outputs = []
+    for cf in tqdm(cluster_files, desc="  Windows"):
+        outputs.append(process_one_window(cf, sr))
 
     summary_rows = []
     for (path, n_cand, n_pass), cf in zip(outputs, cluster_files):

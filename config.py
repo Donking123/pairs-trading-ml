@@ -4,7 +4,7 @@ config.py  —  All parameters in one place. Edit this before running anything e
 from pathlib import Path
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-BASE_DIR  = Path("/Users/deepakgarrepalli/Desktop/MQF/Term 3/Quantitative Trading Strategies")
+BASE_DIR  = Path("/Users/deepakgarrepalli/dev/MQF/MQF/Term 3/Quantitative Trading Strategies")
 DATA_RAW  = BASE_DIR / "data" / "raw"
 DATA_PROC = BASE_DIR / "data" / "processed"
 DATA_RES  = BASE_DIR / "data" / "results"
@@ -23,41 +23,24 @@ END_DATE   = "2023-12-31"
 UNIVERSE           = "sp500"
 MIN_DOLLAR_VOLUME  = 1_000_000   # $1M average daily dollar volume minimum
 
-# ── Factor ETFs ────────────────────────────────────────────────────────────────
-FACTOR_ETFS = {
-    "SPY":  "Market",
-    "XLB":  "Materials",
-    "XLC":  "Communication",
-    "XLE":  "Energy",
-    "XLF":  "Financials",
-    "XLI":  "Industrials",
-    "XLK":  "Technology",
-    "XLP":  "ConsumerStaples",
-    "XLRE": "RealEstate",
-    "XLU":  "Utilities",
-    "XLV":  "Healthcare",
-    "XLY":  "ConsumerDisc",
-    "VTV":  "Value",
-    "MTUM": "Momentum",
-    "USO":  "Oil",
-    # Uncomment to extend to 20-30 factors:
-    # "TLT":  "LongBond",
-    # "GLD":  "Gold",
-    # "IWM":  "SmallCap",
-    # "QQQ":  "NasdaqGrowth",
-    # "EEM":  "EmergingMarkets",
-    # "HYG":  "HighYield",
-    # "LQD":  "InvestmentGrade",
-    # "UUP":  "DollarStrength",
-    # "VNQ":  "REITs",
-    # "IEFA": "InternationalDeveloped",
+# ── Fama-French 5 factors + Momentum ──────────────────────────────────────────
+# Pulled from WRDS ff.fivefactors_daily + ff.factors_daily.
+# These 6 factors are orthogonal by construction — unlike the sector ETFs
+# (XLF/XLK/SPY) which are highly correlated and made Ridge betas noisy.
+FF5_FACTORS = {
+    "mktrf": "Market",
+    "smb":   "Size",
+    "hml":   "Value",
+    "rmw":   "Profitability",
+    "cma":   "Investment",
+    "umd":   "Momentum",
 }
-FACTOR_NAMES = list(FACTOR_ETFS.values())
+FACTOR_NAMES = list(FF5_FACTORS.values())
 
 # ── Rolling window ─────────────────────────────────────────────────────────────
-FORMATION_DAYS  = 252   # 1 year: estimate betas + select pairs
-TRADING_DAYS    = 126   # 6 months: live trading
-ROLL_STEP_DAYS  = 63    # roll forward 1 quarter each iteration
+FORMATION_DAYS  = 756   # 3 years: paper-faithful formation window
+TRADING_DAYS    = 21    # 1 month: monthly trading cadence (paper-faithful)
+ROLL_STEP_DAYS  = 21    # roll forward 1 month each iteration
 MIN_OBS_FRAC    = 0.60  # require ≥60% non-NaN days in formation window
 
 # ── Regression ────────────────────────────────────────────────────────────────
@@ -69,8 +52,9 @@ MIN_OBS_FRAC    = 0.60  # require ≥60% non-NaN days in formation window
 # FIX: lowered from 0.6 → 0.4 to produce smaller, tighter clusters.
 # Previous clusters averaged 20-35 stocks — too large, generating too many
 # spurious candidate pairs. Target: 8-15 stocks per cluster.
-CLUSTER_DISTANCE_THRESHOLD = 0.4
+CLUSTER_DISTANCE_THRESHOLD = 0.15
 MIN_CLUSTER_SIZE            = 5
+MAX_CLUSTER_SIZE            = 30   # skip giant catch-all clusters (too many spurious pairs)
 
 # ── Cointegration ──────────────────────────────────────────────────────────────
 # FIX: tightened from 0.05 → 0.01 (Bonferroni-style correction).
@@ -116,4 +100,4 @@ ROUND_TRIP_BPS   = 5     # was 10; updated to IBKR Pro rate (2 bps commission + 
 SHORT_BORROW_BPS = 25    # was 35; updated to IBKR GC rate of 0.25%/year
 
 # ── Parallelisation ────────────────────────────────────────────────────────────
-N_JOBS = -1   # -1 = all cores; set to 1 for easier debugging
+N_JOBS = 4   # threading backend used in 04 — safe on Mac, no spawn overhead

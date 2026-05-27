@@ -15,7 +15,7 @@ import pandas as pd
 from tqdm import tqdm
 from config import (
     WRDS_USERNAME, START_DATE, END_DATE,
-    FACTOR_ETFS, MIN_DOLLAR_VOLUME,
+    FF5_FACTORS, MIN_DOLLAR_VOLUME,
     DATA_RAW,
 )
 
@@ -132,64 +132,50 @@ def fetch_stock_names(db: wrds.Connection, permnos: list) -> pd.DataFrame:
     return names
 
 
-# ── 4. Factor ETF returns ─────────────────────────────────────────────────────
+# ── 4. Fama-French 5 + Momentum factor returns ────────────────────────────────
 def fetch_factor_returns(db: wrds.Connection) -> pd.DataFrame:
     """
-    Looks up each ETF ticker in crsp.msenames to get its permno, then pulls
-    daily returns from crsp.dsf.
+    Pulls Fama-French 5 factors + momentum (UMD) from the WRDS ff library.
 
-    Some ETFs (e.g. XLC, XLRE) launched after 2010 — they will have NaNs
-    before their inception date. That is correct and handled downstream.
-    """
-    print("Fetching factor ETF returns…")
-    tickers    = list(FACTOR_ETFS.keys())
-    ticker_sql = ",".join(f"'{t}'" for t in tickers)
+    These 6 factors are orthogonal by construction, unlike the sector ETFs
+    (XLF/XLK/SPY) which are highly correlated and made Ridge betas noisy.
 
-    # Resolve tickers → permnos
-    q_ids = f"""
-        SELECT DISTINCT ticker, permno
-        FROM crsp.msenames
-        WHERE ticker IN ({ticker_sql})
-          AND namedt >= '2000-01-01'
+    Sources:
+      ff.fivefactors_daily  →  mktrf, smb, hml, rmw, cma
+      ff.factors_daily      →  umd (momentum)
     """
-    id_map = db.raw_sql(q_ids)
-    # One permno per ticker: pick the one with most price history
-    id_map = (
-        id_map
-        .groupby("ticker")["permno"]
-        .agg(lambda s: s.value_counts().index[0])
-        .reset_index()
+    print("Fetching Fama-French 5 + momentum factors from WRDS ff library…")
+
+    ff5 = db.raw_sql(
+        f"""
+        SELECT date, mktrf, smb, hml, rmw, cma
+        FROM ff.fivefactors_daily
+        WHERE date BETWEEN '{START_DATE}' AND '{END_DATE}'
+        """,
+        date_cols=["date"],
     )
-    found   = set(id_map["ticker"])
-    missing = set(tickers) - found
-    if missing:
-        print(f"  ⚠  Could not resolve tickers: {missing}  (excluded from factors)")
 
-    permno_sql = ",".join(str(p) for p in id_map["permno"])
-    q_ret = f"""
-        SELECT permno, date, ret
-        FROM crsp.dsf
-        WHERE permno IN ({permno_sql})
-          AND date BETWEEN '{START_DATE}' AND '{END_DATE}'
-    """
-    etf_ret = db.raw_sql(q_ret, date_cols=["date"])
-    etf_ret["date"] = pd.to_datetime(etf_ret["date"])
-
-    # Join back to get ticker, then factor name
-    etf_ret = etf_ret.merge(id_map, on="permno", how="left")
-    etf_ret["factor"] = etf_ret["ticker"].map(FACTOR_ETFS)
-
-    factor_wide = (
-        etf_ret
-        .pivot_table(index="date", columns="factor", values="ret", aggfunc="mean")
-        .sort_index()
+    umd = db.raw_sql(
+        f"""
+        SELECT date, umd
+        FROM ff.factors_daily
+        WHERE date BETWEEN '{START_DATE}' AND '{END_DATE}'
+        """,
+        date_cols=["date"],
     )
+
+    merged = ff5.merge(umd, on="date", how="left")
+    merged["date"] = pd.to_datetime(merged["date"])
+    merged = merged.sort_values("date").set_index("date")
+
+    # Rename columns to descriptive names matching FACTOR_NAMES in config
+    merged.columns = list(FF5_FACTORS.values())   # Market, Size, Value, Profitability, Investment, Momentum
 
     out = DATA_RAW / "factor_returns.parquet"
-    factor_wide.to_parquet(out)
-    print(f"  → Factor matrix: {factor_wide.shape[0]} days × {factor_wide.shape[1]} factors")
+    merged.to_parquet(out)
+    print(f"  → FF5 factor matrix: {merged.shape[0]} days × {merged.shape[1]} factors")
     print(f"Saved factor returns →  {out}\n")
-    return factor_wide
+    return merged
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
