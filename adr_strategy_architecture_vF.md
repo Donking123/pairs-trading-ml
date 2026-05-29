@@ -1,6 +1,6 @@
 # Asian ADR Pairs Trading — System Architecture & Implementation Plan
 
-> **Version**: 4.0.0
+> **Version**: 1.0.0
 > **Status**: Living Document
 > **Strategy Reference**: Hong & Susmel (2013), *Pairs-Trading in the Asian ADR Market*
 > **Language**: Python 3.12+
