@@ -106,6 +106,48 @@ class ApprovedPair:
     is_active: bool
 
 
+# Standard ADR ratios (1/N where N = local shares per ADR).  Used to snap the
+# median price-based estimate to the nearest structurally meaningful value.
+_STANDARD_RATIOS: list[float] = [
+    0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0,
+]
+_LOG_STD = np.log(_STANDARD_RATIOS)
+
+
+def _estimate_ratio_from_prices(
+    adr_prices: pd.DataFrame,
+    local_prices: pd.DataFrame,
+    fx_rates: pd.DataFrame,
+    currency: str,
+) -> Optional[float]:
+    """
+    Estimate adr_ratio = median(P_local * FX / P_ADR) then snap to the nearest
+    standard ratio in log-space.  Returns None if the overlap is too thin (<30
+    joint observations) or the raw median is outside [0.001, 1000].
+    """
+    adr = adr_prices.rename(columns={"close": "adr_close"}).set_index("marketdate")[["adr_close"]]
+    loc = local_prices.rename(columns={"close": "local_close"}).set_index("marketdate")[["local_close"]]
+    fx  = fx_rates[fx_rates["base_currency"] == currency].copy()
+    fx["date"] = pd.to_datetime(fx["date"])
+    fx = fx.rename(columns={"date": "marketdate", "mid": "fx_mid"}).set_index("marketdate")[["fx_mid"]]
+
+    adr.index = pd.to_datetime(adr.index)
+    loc.index = pd.to_datetime(loc.index)
+
+    df = adr.join(loc, how="inner").join(fx, how="inner").dropna()
+    df = df[(df["adr_close"] > 0) & (df["local_close"] > 0) & (df["fx_mid"] > 0)]
+
+    if len(df) < 30:
+        return None
+
+    raw = (df["local_close"] * df["fx_mid"] / df["adr_close"]).median()
+    if not np.isfinite(raw) or raw < 0.001 or raw > 1000:
+        return None
+
+    idx = int(np.argmin(np.abs(np.log(raw) - _LOG_STD)))
+    return _STANDARD_RATIOS[idx]
+
+
 # -----------------------------------------------------------------------------
 # Spread reconstruction
 # -----------------------------------------------------------------------------
@@ -220,10 +262,22 @@ def screen_pair(
     und_t = pair_row["underlying_ticker"]
     exch  = pair_row["underlying_exchange"]
     ccy   = pair_row["underlying_currency"]
-    ratio = float(pair_row["adr_ratio"])
-
+    raw_ratio = pair_row["adr_ratio"]
     pair_id = f"{adr_t}__{und_t}"
     diag = {"pair_id": pair_id, "status": "rejected", "reason": ""}
+
+    if raw_ratio is None or (isinstance(raw_ratio, float) and pd.isna(raw_ratio)):
+        adr_s = adr_prices[adr_prices["ticker"] == adr_t][["marketdate", "close"]]
+        und_s = global_prices[global_prices["ticker"] == und_t][["marketdate", "close"]]
+        estimated = _estimate_ratio_from_prices(adr_s, und_s, fx_rates, ccy)
+        if estimated is None:
+            diag["reason"] = "adr_ratio is null and could not be estimated from prices"
+            return None, diag
+        log.warning("[%s] adr_ratio was null; estimated %.4f from price median", pair_id, estimated)
+        ratio = estimated
+        diag["adr_ratio_estimated"] = True
+    else:
+        ratio = float(raw_ratio)
 
     if exch not in ASIAN_EXCHANGES:
         diag["reason"] = f"underlying_exchange={exch} not in ASIAN_EXCHANGES"
@@ -386,7 +440,10 @@ def _load_or_die(path: Path, label: str) -> pd.DataFrame:
     if not path.exists():
         log.error("%s not found at %s — run the relevant fetch script first", label, path)
         sys.exit(2)
-    df = pd.read_parquet(path)
+    try:
+        df = pd.read_parquet(path)
+    except OSError:
+        df = pd.read_parquet(path, engine="fastparquet")
     log.info("loaded %s: %d rows", label, len(df))
     if "marketdate" in df.columns:
         df["marketdate"] = pd.to_datetime(df["marketdate"]).dt.normalize()

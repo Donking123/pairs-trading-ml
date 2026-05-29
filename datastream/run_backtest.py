@@ -169,9 +169,15 @@ def load_panel(
         local_close_usd, spread
     Inner-joined across the three sources so each row is fully valid.
     """
-    adr = pd.read_parquet(adr_prices_path)
-    glb = pd.read_parquet(global_prices_path)
-    fx  = pd.read_parquet(fx_rates_path)
+    def _read(path: Path) -> pd.DataFrame:
+        try:
+            return pd.read_parquet(path)
+        except OSError:
+            return pd.read_parquet(path, engine="fastparquet")
+
+    adr = _read(adr_prices_path)
+    glb = _read(global_prices_path)
+    fx  = _read(fx_rates_path)
 
     adr["marketdate"] = pd.to_datetime(adr["marketdate"]).dt.normalize()
     glb["marketdate"] = pd.to_datetime(glb["marketdate"]).dt.normalize()
