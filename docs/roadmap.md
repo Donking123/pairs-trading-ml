@@ -5,7 +5,7 @@
 **Objectives**: Validate Asian ADR pair selection end-to-end; no live trading
 
 **Architecture decisions**
-- Standalone scripts in `datastream/`; no event bus, no `src/asian_adr/` package required
+- Standalone scripts in `datastream/`
 - WRDS Datastream (`tr_ds_equities.wrds_ds2dsf`) for historical OHLCV prices
 - WRDS Datastream (`trdstrm.ds2fxrate`) for historical daily FX rates
 

@@ -13,6 +13,7 @@
 ## Table of Contents
 
 1.  [High-Level Architecture](#1-high-level-architecture)
+    - 1.1 Overview · 1.2 Event Flow (Live) · 1.3 Event Flow (Backtest) · 1.4 Research Flow · 1.5 Concurrency Model · 1.6 System State Recovery
 2.  [Strategy Specification](#2-strategy-specification)
 3.  [Core Components](#3-core-components)
 4.  [Architecture Principles](#4-architecture-principles)
@@ -133,25 +134,52 @@ Every state transition is triggered by an immutable event. Components never call
 
 ### 1.4 Research Flow — Asian ADR Pair Selection (Offline)
 
+All research steps are implemented as standalone scripts in `datastream/` — no `src/asian_adr/` package is involved.
+
 ```
-1.  WRDS Fetcher pulls U.S. ADR OHLCV (Datastream tr_ds2.wrds_ds2dsf, type_='ADR') and
-    Asian underlying prices (Datastream tr_ds2.wrds_ds2dsf)
-2.  Asian ADR Screener filters ADRs whose underlying exchange is in
-    {TSE, HKEX, KRX, BSE, NSE, ASX, SGX, TWSE, IDX, PSE, BURSA}
-3.  ADR Ratio Fetcher retrieves conversion ratio (local shares per ADR)
-4.  FX Fetcher retrieves historical daily FX rates from WRDS Datastream (`trdstrm.ds2fxrate` / `trdstrm.ds2fxcode`) for USD conversion; Datastream stores rates as CCY per 1 USD — the fetcher inverts each value to USD per CCY on output
-5.  Dollar Spread Calculator: spread_t = P_ADR,t − ratio × P_local,t(USD)
-6.  Cointegration Tester: ADF + Phillips-Perron on spread series (reject unit root at 5%)
-7.  Liquidity Filter: min 50% non-zero return days both legs; min 2 years trading
-8.  Roll Spread Estimator: 2 × √|autocov(returns)| — transaction cost calibration
-9.  Pair Registry Writer: stores approved pairs with ratio, currency, thresholds, Roll spreads
+1.  datastream/fetch_datastream_adr_data.py   — pulls U.S. ADR OHLCV from WRDS Datastream
+                                                → data/parquet/adr/adr_prices.parquet
+                                                → data/parquet/adr/adr_reference.parquet
+2.  datastream/fetch_datastream_global_data.py — pulls Asian underlying OHLCV from WRDS
+                                                → data/parquet/global/global_prices.parquet
+3.  datastream/fetch_fx_history.py            — pulls SPOT FX rates from WRDS Datastream
+                                                (CCY/USD inverted to USD/CCY on output)
+                                                → data/parquet/fx/fx_rates.parquet
+4.  datastream/run_asian_adr_screening.py     — reads the three Parquet caches and runs:
+                                                  · Asian exchange filter
+                                                  · ADR ratio estimation (price-median + snap to standard)
+                                                  · Dollar spread: P_ADR − (P_local × FX) / ratio
+                                                  · ADF + Phillips-Perron cointegration test (5%)
+                                                  · Liquidity filter: ≥ 50% non-zero return days, ≥ 2 years
+                                                  · Roll (1984) effective spread estimation
+                                                → config/pairs/asian_adr_pairs.json
+                                                → config/pairs/screening_diagnostics.json
+5.  datastream/run_rescreen.py                — incremental re-screening orchestrator (Phase 7):
+                                                  · auto-detects Parquet tail dates
+                                                  · fetches only the missing date gap from WRDS
+                                                  · re-runs the full screening pipeline
+                                                  · writes changelog (added / dropped / changed pairs)
+                                                  · backs up the previous registry
 ```
 
 ### 1.5 Concurrency Model
 
-- **Single process (Phase 1–2)**: `asyncio` event loop, coroutine-per-component
-- **Multi-process (Phase 3+)**: Each component is a separate process; Kafka as bus
-- **Multi-machine (Phase 5+)**: Kubernetes pods, each component independently scaled
+| Phase | Model | Notes |
+|-------|-------|-------|
+| Phase 1–2 | Single process, `asyncio` event loop, coroutine-per-component | |
+| Phase 3+ | Multi-process; each component is a separate process; Kafka as bus | |
+| Phase 5+ | Kubernetes pods; each component independently scaled | |
+
+### 1.6 System State Recovery Sequence (Live)
+
+```
+1. Load pair registry from PostgreSQL (active pairs only)
+2. Rebuild rolling spread stats from last T bars of Parquet cache
+3. Reload open position state from PostgreSQL
+4. Reconcile open orders with broker REST API
+5. Resume market data subscriptions (U.S. ADR + Asian feeds + FX)
+6. Mark system READY; begin processing daily bars
+```
 
 ---
 
@@ -277,18 +305,13 @@ Used as a post-hoc round-trip cost estimate per pair. Not used as an entry signa
 - Normalise all data into canonical `HistoricalBarEvent` / `FXRateEvent` schema
 - Cache results as Parquet files on S3/MinIO
 
-**Internal Modules**
+**Scripts** (`datastream/` — standalone; never import from `src/asian_adr/`)
 
 ```
-data/
-├── wrds_fetcher.py           # WRDS connection, query orchestration
-├── datastream_queries.py     # tr_ds_equities.wrds_ds2dsf: U.S. ADR prices (typecode='ADR')
-├── datastream_global.py      # tr_ds_equities.wrds_ds2dsf: Asian underlying OHLCV
-├── fx_fetcher.py             # WRDS Datastream trdstrm.ds2fxrate: historical daily FX rates
-├── adr_reference.py          # ADR → underlying mapping (dscompcode join); ratio sourced separately
-├── normalizer.py             # Raw rows → HistoricalBarEvent / FXRateEvent
-├── cache.py                  # Parquet read/write on S3/MinIO
-└── universe_builder.py       # ADR universe: Asian exchange filter + liquidity pre-screen
+datastream/
+├── fetch_datastream_adr_data.py       # WRDS: U.S. ADR OHLCV + reference → data/parquet/adr/
+├── fetch_datastream_global_data.py    # WRDS: Asian underlying OHLCV → data/parquet/global/
+└── fetch_fx_history.py               # WRDS: SPOT FX rates (CCY/USD → inverted USD/CCY) → data/parquet/fx/
 ```
 
 **Sample WRDS Query — U.S. ADR Prices**
@@ -441,73 +464,52 @@ ASIAN_EXCHANGES: set[str] = {
 | Criterion | Threshold |
 |-----------|-----------|
 | Cointegration (ADF + PP on dollar spread) | Reject unit root at 5% |
-| Min continuous trading | 2 years |
+| Min continuous trading | 2 years (~504 trading days) |
 | Min non-zero return days (both legs) | ≥ 50% of trading days |
 | Zero-return-day % (ADR, entry ceiling) | ≤ 50% |
-| ADR ratio available | Required; ratio > 0 |
+| ADR ratio resolvable | Required; ratio > 0 |
 
-**Asian ADR Research Pipeline**
+**Screening Pipeline** (`datastream/run_asian_adr_screening.py`)
 
-```python
-class AsianADRSelectionPipeline:
-    def run(self, as_of_date: date) -> list[AsianADRApprovedPair]:
-        candidates = self.adr_screener.enumerate(as_of_date)
-        candidates = [c for c in candidates if c.underlying_exchange in ASIAN_EXCHANGES]
-        candidates = [c for c in candidates if c.adr_ratio and c.adr_ratio > 0]
-        candidates = self.liquidity_filter.filter(
-            candidates, min_non_zero_return_pct=Decimal("0.50")
-        )
-
-        approved = []
-        for pair in candidates:
-            fx_series  = self.fx_fetcher.get(pair.currency, as_of_date, lookback_days=3000)
-            adr_prices = self.price_fetcher.get(pair.adr_ticker, as_of_date, lookback_days=3000)
-            und_prices = self.price_fetcher.get_foreign(pair.underlying_ticker, as_of_date, lookback_days=3000)
-
-            # Dollar spread — β fixed at ratio, never OLS-estimated
-            local_usd = und_prices * fx_series
-            spread    = adr_prices - local_usd / pair.adr_ratio
-
-            if not self.cointegration_tester.is_cointegrated(spread):
-                continue
-
-            approved.append(AsianADRApprovedPair(
-                adr_ticker=pair.adr_ticker,
-                underlying_ticker=pair.underlying_ticker,
-                underlying_exchange=pair.underlying_exchange,
-                underlying_currency=pair.currency,
-                adr_ratio=pair.adr_ratio,
-                estimation_days=60,
-                holding_days=90,
-                k0=Decimal("2.0"),
-                kc=Decimal("0.0"),
-                zero_return_pct_adr=self._zero_return_pct(adr_prices),
-                roll_spread_local=self._roll_effective_spread(und_prices),
-                roll_spread_adr=self._roll_effective_spread(adr_prices),
-                fx_hedge_required=False,
-            ))
-        return approved
+```
+1. Filter adr_reference to ASIAN_EXCHANGES
+2. For each candidate pair:
+   a. Resolve adr_ratio — estimate from median(P_local × FX / P_ADR), snap to nearest
+      standard ratio (0.01, 0.1, 0.5, 1, 2, 5, 10 …); reject if unresolvable
+      Note: tr_ds_equities.wrds_ds_names has no adrr column — ratio must be estimated
+   b. Reconstruct dollar spread: P_ADR − (P_local × FX) / ratio  (β = ratio, never OLS)
+   c. Trim to as_of date (no look-ahead)
+   d. Apply liquidity filter: non_zero_return_pct ≥ 0.50 on both legs; ≥ 2 years trading
+   e. ADF + Phillips-Perron cointegration test (p < 0.05 on both)
+   f. Compute Roll (1984) effective spread: 2 × √|autocov(returns)|
+3. Write approved pairs → config/pairs/asian_adr_pairs.json
+4. Write per-candidate diagnostics → config/pairs/screening_diagnostics.json
 ```
 
 **Roll (1984) Effective Spread**
 
 ```python
-def _roll_effective_spread(self, prices: pd.Series) -> Decimal:
-    returns  = prices.pct_change().dropna()
-    autocov  = returns.autocorr(lag=1) * returns.var()
-    return Decimal(str(round(2 * abs(autocov) ** 0.5, 6)))
+def roll_effective_spread(prices: pd.Series) -> float:
+    rets = prices.pct_change().dropna().values
+    autocov = float(np.cov(rets[:-1], rets[1:], ddof=1)[0, 1])
+    return float(2.0 * np.sqrt(abs(autocov)))
 ```
 
-**Internal Modules**
+Used as a post-hoc round-trip cost estimate per pair — not as an entry filter.
+
+**Scripts** (`datastream/` — standalone; never import from `src/asian_adr/`)
 
 ```
-research/
-├── asian_adr_screener.py       # Filter to Asian exchanges; map to underlying via WRDS
-├── asian_adr_cointegration.py  # ADF / PP on dollar spread
-├── asian_adr_liquidity.py      # Non-zero-return-day filter (Bekaert et al. 2007)
-├── asian_adr_roll_spread.py    # Roll (1984) effective spread estimator
-└── asian_adr_registry.py       # Write approved pairs to PostgreSQL
+datastream/
+├── run_asian_adr_screening.py  # Full one-shot pair selection pipeline
+└── run_rescreen.py             # Incremental re-screening orchestrator (Phase 7)
 ```
+
+**Design Rules**
+- `datastream/` scripts never import from `src/asian_adr/`
+- Cointegration is always tested on the **dollar spread**, never log-prices
+- β is always the registered `adr_ratio`; OLS estimation is prohibited (ADR-002)
+- Pair selection is always run as-of a specific date; no future data permitted
 
 ---
 
@@ -1127,16 +1129,6 @@ asian-adr-strategy/
 │       │   ├── asyncio_bus.py
 │       │   └── kafka_bus.py
 │       │
-│       ├── data/
-│       │   ├── wrds_fetcher.py
-│       │   ├── datastream_queries.py   # U.S. ADR prices (tr_ds_equities.wrds_ds2dsf, typecode='ADR')
-│       │   ├── datastream_global.py    # Asian underlying prices
-│       │   ├── fx_fetcher.py           # OANDA REST daily FX
-│       │   ├── adr_reference.py        # ADR → underlying mapping
-│       │   ├── normalizer.py
-│       │   ├── cache.py
-│       │   └── universe_builder.py     # Asian exchange filter
-│       │
 │       ├── feed_handler/
 │       │   ├── connector.py
 │       │   ├── normalizer.py
@@ -1152,13 +1144,6 @@ asian-adr-strategy/
 │       │   ├── staleness_monitor.py
 │       │   └── connectors/
 │       │       └── oanda.py            # OANDA daily FX rates
-│       │
-│       ├── research/
-│       │   ├── asian_adr_screener.py
-│       │   ├── asian_adr_cointegration.py
-│       │   ├── asian_adr_liquidity.py
-│       │   ├── asian_adr_roll_spread.py
-│       │   └── asian_adr_registry.py
 │       │
 │       ├── strategy/
 │       │   └── hong_susmel/
@@ -1229,7 +1214,6 @@ asian-adr-strategy/
 │       └── runners/
 │           ├── live_runner.py
 │           ├── backtest_runner.py
-│           ├── research_runner.py
 │           └── data_recorder.py
 │
 ├── tests/
@@ -1247,21 +1231,35 @@ asian-adr-strategy/
 │   │   └── test_asian_adr_backtest_e2e.py
 │   └── conftest.py
 │
-├── datastream/
+├── datastream/                            # All offline data + research scripts (no src/ dependency)
 │   ├── data/
-│   │   └── parquet/                       # Local Parquet cache (dev); S3/MinIO in production
-│   │       ├── adr/
-│   │       │   ├── adr_prices.parquet     # infocode, marketdate, close/high/low/open, volume, adj_factor, ticker, isin
-│   │       │   └── adr_reference.parquet  # adr_ticker, adr_isin, adr_infocode, underlying_ticker, underlying_exchange, underlying_currency, adr_ratio (NULL — sourced separately)
-│   │       ├── global/
-│   │       │   └── global_prices.parquet  # infocode, marketdate, close/high/low/open, volume, adj_factor, ticker, exchange, currency
-│   │       └── fx/
-│   │           └── fx_rates.parquet       # date, base_currency, quote_currency, currency_pair, mid (USD per 1 unit of base), provider="datastream"
-│   ├── fetch_datastream_adr_data.py
-│   ├── fetch_datastream_global_data.py
-│   ├── fetch_fx_history.py
-│   ├── run_asian_adr_screening.py
-│   ├── run_backtest.py
+│   │   ├── parquet/                       # Local Parquet cache (dev); S3/MinIO in production
+│   │   │   ├── adr/
+│   │   │   │   ├── adr_prices.parquet     # infocode, marketdate, OHLCV, adj_factor, ticker, isin
+│   │   │   │   └── adr_reference.parquet  # adr_ticker, underlying_ticker, exchange, currency, adr_ratio (NULL — estimated in screening)
+│   │   │   ├── global/
+│   │   │   │   └── global_prices.parquet  # infocode, marketdate, OHLCV, adj_factor, ticker, exchange, currency
+│   │   │   └── fx/
+│   │   │       └── fx_rates.parquet       # date, base_currency, quote_currency, mid (USD/CCY), provider
+│   │   └── backtest/                      # Backtest run outputs
+│   │       └── run_YYYYMMDD_HHMMSS/
+│   │           ├── trades.parquet
+│   │           ├── summary.json
+│   │           ├── distribution.json
+│   │           └── tearsheet.html
+│   ├── config/
+│   │   └── pairs/
+│   │       ├── asian_adr_pairs.json       # Active approved pair registry
+│   │       ├── screening_diagnostics.json # Per-candidate accept/reject log
+│   │       ├── backups/                   # Timestamped registry snapshots (run_rescreen.py)
+│   │       └── changelogs/               # Per-run added/dropped/changed diffs (run_rescreen.py)
+│   ├── fetch_datastream_adr_data.py       # WRDS: U.S. ADR OHLCV + reference → adr/
+│   ├── fetch_datastream_global_data.py    # WRDS: Asian underlying OHLCV → global/
+│   ├── fetch_fx_history.py               # WRDS: SPOT FX rates (inverted USD/CCY) → fx/
+│   ├── run_asian_adr_screening.py         # Full pair selection pipeline → asian_adr_pairs.json
+│   ├── run_rescreen.py                    # Incremental re-screening orchestrator (Phase 7)
+│   ├── run_backtest.py                    # End-to-end backtest → data/backtest/
+│   ├── run_backtest_report.py             # HTML tearsheet from backtest output
 │   └── healthcheck.py
 │
 ├── notebooks/
@@ -1276,17 +1274,43 @@ asian-adr-strategy/
 │   └── docker-compose.yml
 │
 └── docs/
-    ├── architecture.md
-    ├── strategy_methodology.md
+    ├── README.md
+    ├── overview.md
+    ├── strategy-specification.md
+    ├── data-contracts.md
+    ├── technology-stack.md
+    ├── project-structure.md
+    ├── components.md
+    ├── backtesting.md
+    ├── engineering-practices.md
+    ├── roadmap.md
+    ├── components/
+    │   ├── wrds-data-fetcher.md
+    │   ├── feed-handler.md
+    │   ├── fx-handler.md
+    │   ├── research.md
+    │   ├── strategy.md
+    │   ├── event-bus.md
+    │   ├── risk.md
+    │   ├── position.md
+    │   ├── oms.md
+    │   ├── order-gateways.md
+    │   ├── roce-ruce.md
+    │   └── backtest.md
+    ├── infrastructure/
+    │   ├── observability.md
+    │   ├── storage.md
+    │   └── deployment.md
     ├── runbooks/
     └── adr/
 ```
 
 **Key structural rules:**
 - `core/` has zero external dependencies — only stdlib + pydantic
-- `research/` is a standalone offline package; never imports from `strategy/` or `risk/`
+- `datastream/` scripts are standalone — they never import from `src/asian_adr/`
 - `strategy/` never imports from `risk/`, `position/`, or `gateways/` directly
 - `notebooks/` never imported by `src/` (enforced by ruff rule)
+- Each component under `src/asian_adr/` can evolve into its own microservice package
 
 ---
 
@@ -1771,21 +1795,32 @@ zero_return_pct = Gauge(
 | **System Health** | Latency, queue depths, feed reconnects, FX staleness |
 | **Risk Monitor** | Drawdown meter, country concentration, kill switch status |
 
-### 11.4 Latency Targets
+### 11.4 Alert Rules
+
+| Alert | Trigger | Severity |
+|-------|---------|----------|
+| Overnight abort cluster | > 20% of AWAITING_LOCAL positions abort same morning | Critical |
+| Force-close cluster | > 5 force-closes in one bar | Warning |
+| Zero-return-day spike | > 50% of pairs trigger ZeroReturnDayFilter same bar | Warning |
+| FX staleness | FX rate age > 2 business days for any active currency | Critical |
+| Kill switch triggered | Any | Critical |
+| Feed gap | Asian or U.S. data gap > 3 bars | Warning |
+
+### 11.6 Latency Targets
 
 ```
 Daily bar received from U.S. feed:           baseline
 Daily bar received from Asian feed:          baseline
 FX rate received (daily close):              baseline
 Feed → Event Bus:                            target < 50ms   (daily bar; not HFT)
-Event Bus → H&S Engine:                      target < 5ms
-H&S Engine spread computation:               target < 2ms
-Signal → Risk evaluation:                    target < 5ms
-Risk Decision → Execution Sequencer:         target < 2ms
-Sequencer → U.S. gateway:                    target < 10ms
-Gateway → Broker API:                        target < 100ms
+Event Bus → H&S Engine:                     target < 5ms
+H&S Engine spread computation:              target < 2ms
+Signal → Risk evaluation:                   target < 5ms
+Risk Decision → Execution Sequencer:        target < 2ms
+Sequencer → U.S. gateway:                   target < 10ms
+Gateway → Broker API:                       target < 100ms
 ──────────────────────────────────────────────────────────
-Total signal-to-order (end-of-day batch):    target < 200ms
+Total signal-to-order (end-of-day batch):   target < 200ms
 ```
 
 ---
@@ -1797,22 +1832,20 @@ Total signal-to-order (end-of-day batch):    target < 200ms
 **Objectives**: Validate Asian ADR pair selection end-to-end; no live trading
 
 **Architecture Decisions**:
-- Standalone research scripts; no event bus required
-- WRDS Datastream (tr_ds2.wrds_ds2dsf) for historical prices
-- OANDA REST API for historical FX data
+- Standalone scripts in `datastream/`
+- WRDS Datastream (`tr_ds_equities.wrds_ds2dsf`) for historical OHLCV prices
+- WRDS Datastream (`trdstrm.ds2fxrate`) for historical daily FX rates
 
 **Deliverables**
-- `data/wrds_fetcher.py` — authenticate, query `tr_ds2.wrds_ds2dsf` (ADR tickers), cache to Parquet
-- `data/datastream_global.py` — Asian underlying price history
-- `data/fx_fetcher.py` — OANDA historical FX rates to Parquet
-- `data/adr_reference.py` — ADR → underlying mapping, conversion ratios
-- `research/asian_adr_screener.py` — enumerate ADRs on Asian exchanges
-- `research/asian_adr_cointegration.py` — ADF / PP on dollar spread
-- `research/asian_adr_liquidity.py` — non-zero-return-day filter
-- `research/asian_adr_roll_spread.py` — Roll (1984) effective spread
-- `research/asian_adr_registry.py` — write approved pairs to PostgreSQL
+- `datastream/fetch_datastream_adr_data.py` — WRDS query for U.S. ADR OHLCV + reference → Parquet
+- `datastream/fetch_datastream_global_data.py` — WRDS query for Asian underlying OHLCV → Parquet
+- `datastream/fetch_fx_history.py` — WRDS Datastream SPOT FX rates (inverted to USD/CCY) → Parquet
+- `datastream/run_asian_adr_screening.py` — full pipeline: exchange filter, ratio estimation (price-median), dollar spread, ADF/PP, liquidity filter, Roll spread → `asian_adr_pairs.json`
+- `datastream/run_rescreen.py` — incremental re-screening orchestrator: gap-fetch + re-run + changelog (Phase 7)
 
 **Testing**: Unit tests on synthetic ADR/FX series with known spread properties
+
+**Accepted technical debt**: No event bus; no persistence beyond Parquet and JSON
 
 ---
 
@@ -1932,6 +1965,9 @@ uv run python datastream/run_asian_adr_screening.py --as-of 2002-01-01
 # Run backtest (reproduces paper)
 uv run python datastream/run_backtest.py --start 2002-01-01 --end 2011-12-31
 
+# Generate tearsheet
+uv run python datastream/run_backtest_report.py
+
 # Run in paper trading mode
 uv run python -m asian_adr.runners.live_runner --config config/development.toml
 ```
@@ -2007,7 +2043,7 @@ services:
 
   research-scheduler:
     build: {context: .., dockerfile: docker/Dockerfile.research}
-    command: python -m asian_adr.runners.research_runner --schedule weekly
+    command: python datastream/run_rescreen.py --as-of today
     depends_on: [postgres]
     environment:
       WRDS_USERNAME: ${WRDS_USERNAME}
@@ -2018,14 +2054,51 @@ volumes:
   postgres_data:
 ```
 
-### 13.3 Production Deployment Evolution
+### 13.3 CI/CD Pipeline (GitHub Actions)
+
+```yaml
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres: {image: timescale/timescaledb:latest-pg16}
+      redis: {image: redis:7-alpine}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync
+      - run: uv run ruff check src/ tests/
+      - run: uv run mypy src/
+      - run: uv run pytest tests/unit/ tests/integration/ -v --cov=asian_adr
+
+  backtest-regression:
+    needs: test
+    steps:
+      - run: uv run pytest tests/system/ -v  # Golden output tests
+
+  build:
+    needs: [test, backtest-regression]
+    steps:
+      - run: docker build -t asian-adr:${{ github.sha }} -f docker/Dockerfile.trading .
+      - run: docker push ghcr.io/${{ github.repository }}/asian-adr:${{ github.sha }}
+
+  deploy-staging:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - run: argocd app sync asian-adr-staging
+```
+
+### 13.4 Production Deployment Evolution
 
 | Phase | Infrastructure | When to Use |
 |-------|---------------|-------------|
 | Phase 1–2 | Local laptop / single VM | Research, backtesting |
 | Phase 3–5 | Docker Compose on dedicated VM | Paper trading, small live deployment |
 | Phase 6 | Docker Compose + managed DBs (RDS, ElastiCache) | Production live trading |
-| Phase 7 | Kubernetes (EKS/GKE) + Helm + ArgoCD | High availability |
+| Phase 7 | Kubernetes (EKS/GKE) + Helm + ArgoCD | High availability, multi-strategy |
 
 ---
 
