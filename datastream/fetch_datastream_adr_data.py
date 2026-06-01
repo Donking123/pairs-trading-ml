@@ -51,7 +51,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("fetch_adr")
 
-start_date = date(2026, 4, 30) - timedelta(days=365 * 10)
+start_date = date(2026, 4, 30) - timedelta(days=365 * 15)
 end_date = date(2026, 4, 30)
 
 WRDS_USERNAME = "nglei2025"
@@ -195,7 +195,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="Start date (YYYY-MM-DD)")
     p.add_argument("--end", type=_parse_date, default=end_date,
                    help="End date (YYYY-MM-DD)")
-    p.add_argument("--out", type=Path, default=Path("data/parquet/adr"),
+    p.add_argument("--out", type=Path, default=Path("datastream/data/parquet/adr"),
                    help="Output directory for Parquet files")
     p.add_argument("--discover", action="store_true",
                    help="List available tables in tr_ds* schemas and exit")

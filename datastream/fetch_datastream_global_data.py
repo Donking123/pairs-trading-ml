@@ -51,7 +51,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("fetch_global")
 
-start_date = date(2026, 4, 30) - timedelta(days=365 * 10)
+start_date = date(2026, 4, 30) - timedelta(days=365 * 15)
 end_date = date(2026, 4, 30)
 
 ASIAN_EXCHANGES: set[str] = {
@@ -199,9 +199,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    default=start_date)
     p.add_argument("--end", type=_parse_date, default=end_date)
     p.add_argument("--adr-reference", type=Path,
-                   default=Path("data/parquet/adr/adr_reference.parquet"),
+                   default=Path("datastream/data/parquet/adr/adr_reference.parquet"),
                    help="Path to ADR reference Parquet (output of fetch_datastream_adr_data.py)")
-    p.add_argument("--out", type=Path, default=Path("data/parquet/global"))
+    p.add_argument("--out", type=Path, default=Path("datastream/data/parquet/global"))
     return p.parse_args(argv)
 
 

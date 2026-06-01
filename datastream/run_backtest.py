@@ -488,12 +488,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         description="Backtest the Hong & Susmel Asian ADR pairs strategy.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--adr-prices",    type=Path, default=Path("data/parquet/adr/adr_prices.parquet"))
-    p.add_argument("--global-prices", type=Path, default=Path("data/parquet/global/global_prices.parquet"))
-    p.add_argument("--fx-rates",      type=Path, default=Path("data/parquet/fx/fx_rates.parquet"))
+    p.add_argument("--adr-prices",    type=Path, default=Path("datastream/data/parquet/adr/adr_prices.parquet"))
+    p.add_argument("--global-prices", type=Path, default=Path("datastream/data/parquet/global/global_prices.parquet"))
+    p.add_argument("--fx-rates",      type=Path, default=Path("datastream/data/parquet/fx/fx_rates.parquet"))
     p.add_argument("--pairs",         type=Path, default=Path("config/pairs/asian_adr_pairs.json"))
     p.add_argument("--out-dir",       type=Path,
-                   default=Path("data/backtest")
+                   default=Path("datastream/data/backtest")
                             / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 
     p.add_argument("--T",  dest="T",  type=int, default=60, help="estimation window (days)")

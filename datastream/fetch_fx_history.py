@@ -60,11 +60,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("fetch_fx")
 
-start_date = date(2026, 4, 30) - timedelta(days=365 * 10)
+start_date = date(2026, 4, 30) - timedelta(days=365 * 15)
 end_date = date(2026, 4, 30)
 
 WRDS_USERNAME = os.environ.get("WRDS_USERNAME", "nglei2025")
-WRDS_PASSWORD = os.environ.get("WRDS_PASSWORD")
+WRDS_PASSWORD = os.environ.get("WRDS_PASSWORD", "Police@123456789")
 
 # Pre-euro legacy currencies superseded by EUR in 1999-2002, plus the old
 # Turkish Lira (TRL, replaced by TRY in 2005). Datastream no longer carries

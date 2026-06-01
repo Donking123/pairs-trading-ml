@@ -1,0 +1,19 @@
+{
+  "enabledPlugins": {
+    "financial-analysis@local-desktop-app-uploads": false,
+    "investment-banking@local-desktop-app-uploads": false,
+    "wealth-management@local-desktop-app-uploads": false,
+    "private-equity@local-desktop-app-uploads": false,
+    "equity-research@local-desktop-app-uploads": false,
+    "fund-admin@local-desktop-app-uploads": false,
+    "earnings-reviewer@local-desktop-app-uploads": false,
+    "market-researcher@local-desktop-app-uploads": false,
+    "meeting-prep-agent@local-desktop-app-uploads": false,
+    "model-builder@local-desktop-app-uploads": false,
+    "pitch-agent@local-desktop-app-uploads": false,
+    "valuation-reviewer@local-desktop-app-uploads": false,
+    "playwright@claude-plugins-official": false,
+    "context7-plugin@context7-marketplace": true,
+    "context7@claude-plugins-official": true
+  }
+}
