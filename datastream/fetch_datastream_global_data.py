@@ -38,7 +38,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+
+from dotenv import load_dotenv
+load_dotenv()
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -68,8 +72,8 @@ ASIAN_EXCHANGES: set[str] = {
     "KLS",               # Malaysia (Bursa)
 }
 
-WRDS_USERNAME = "nglei2025"
-WRDS_PASSWORD = "Police@123456789"
+WRDS_USERNAME = os.environ.get("WRDS_USERNAME")
+WRDS_PASSWORD = os.environ.get("WRDS_PASSWORD")
 
 
 # -----------------------------------------------------------------------------
