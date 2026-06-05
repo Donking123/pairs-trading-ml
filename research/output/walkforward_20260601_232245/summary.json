@@ -1,0 +1,29 @@
+{
+  "n_trades": 3138,
+  "n_closed": 1817,
+  "n_overnight_abort": 1321,
+  "n_force_close": 0,
+  "abort_rate": 0.421,
+  "median_roce": 0.029878,
+  "median_ruce": 0.058721,
+  "median_roce_net": 0.029591,
+  "median_ruce_net": 0.058498,
+  "median_ruce_net_fx": 0.060725,
+  "median_borrow_cost": 0.000164,
+  "median_fx_pnl": -0.000109,
+  "median_duration": 6.0,
+  "n_pairs_traded": 213,
+  "n_pairs_loaded": 0,
+  "config": {
+    "estimation_days": 60,
+    "holding_days": 90,
+    "k0": 2.0,
+    "kc": 0.0,
+    "cointegration_alpha": 0.05,
+    "min_history_days": 504,
+    "min_non_zero_return_pct": 0.5,
+    "max_zero_return_pct_adr": 0.5
+  },
+  "evaluation": "out_of_sample_walkforward",
+  "n_folds": 4
+}

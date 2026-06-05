@@ -1,0 +1,17 @@
+{
+  "metric": "ruce_net",
+  "n_strategy_trades": 1150,
+  "bootstrap": {
+    "median": 0.028773,
+    "ci_low": 0.023062,
+    "ci_high": 0.032255,
+    "p_value_gt_0": 0.0
+  },
+  "random_entry_null": {
+    "n_valid_sims": 1000,
+    "null_median_mean": -0.026655,
+    "null_median_p95": -0.017806,
+    "strategy_median": 0.028773,
+    "empirical_p_value": 0.0
+  }
+}

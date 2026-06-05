@@ -1,0 +1,20 @@
+{
+  "n_trades": 7784,
+  "n_closed": 4687,
+  "n_overnight_abort": 3097,
+  "n_force_close": 0,
+  "abort_rate": 0.3979,
+  "median_roce": 0.023604,
+  "median_ruce": 0.037054,
+  "median_roce_net": 0.002037,
+  "median_ruce_net": 0.015607,
+  "median_duration": 6.0,
+  "n_pairs_traded": 201,
+  "n_pairs_loaded": 201,
+  "config": {
+    "T": 60,
+    "H": 90,
+    "k0": 2.0,
+    "kc": 0.0
+  }
+}

@@ -1,0 +1,130 @@
+[
+  {
+    "borrow_rate_pct": 0.0,
+    "slippage_bps_per_leg": 0.0,
+    "total_extra_cost_bps": 0.0,
+    "median_ruce_net": 0.044104,
+    "pct_profitable": 0.7417,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 0.0,
+    "slippage_bps_per_leg": 5.0,
+    "total_extra_cost_bps": 20.0,
+    "median_ruce_net": 0.042104,
+    "pct_profitable": 0.7304,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 0.0,
+    "slippage_bps_per_leg": 10.0,
+    "total_extra_cost_bps": 40.0,
+    "median_ruce_net": 0.040104,
+    "pct_profitable": 0.72,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 0.0,
+    "slippage_bps_per_leg": 20.0,
+    "total_extra_cost_bps": 80.0,
+    "median_ruce_net": 0.036104,
+    "pct_profitable": 0.7009,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 0.5,
+    "slippage_bps_per_leg": 0.0,
+    "total_extra_cost_bps": 1.1,
+    "median_ruce_net": 0.044063,
+    "pct_profitable": 0.7417,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 0.5,
+    "slippage_bps_per_leg": 5.0,
+    "total_extra_cost_bps": 21.1,
+    "median_ruce_net": 0.042063,
+    "pct_profitable": 0.7304,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 0.5,
+    "slippage_bps_per_leg": 10.0,
+    "total_extra_cost_bps": 41.1,
+    "median_ruce_net": 0.040063,
+    "pct_profitable": 0.72,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 0.5,
+    "slippage_bps_per_leg": 20.0,
+    "total_extra_cost_bps": 81.1,
+    "median_ruce_net": 0.036063,
+    "pct_profitable": 0.7,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 1.0,
+    "slippage_bps_per_leg": 0.0,
+    "total_extra_cost_bps": 2.2,
+    "median_ruce_net": 0.043961,
+    "pct_profitable": 0.7409,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 1.0,
+    "slippage_bps_per_leg": 5.0,
+    "total_extra_cost_bps": 22.2,
+    "median_ruce_net": 0.041961,
+    "pct_profitable": 0.7304,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 1.0,
+    "slippage_bps_per_leg": 10.0,
+    "total_extra_cost_bps": 42.2,
+    "median_ruce_net": 0.039961,
+    "pct_profitable": 0.72,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 1.0,
+    "slippage_bps_per_leg": 20.0,
+    "total_extra_cost_bps": 82.2,
+    "median_ruce_net": 0.035961,
+    "pct_profitable": 0.7,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 2.0,
+    "slippage_bps_per_leg": 0.0,
+    "total_extra_cost_bps": 4.5,
+    "median_ruce_net": 0.043578,
+    "pct_profitable": 0.7391,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 2.0,
+    "slippage_bps_per_leg": 5.0,
+    "total_extra_cost_bps": 24.5,
+    "median_ruce_net": 0.041578,
+    "pct_profitable": 0.7304,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 2.0,
+    "slippage_bps_per_leg": 10.0,
+    "total_extra_cost_bps": 44.5,
+    "median_ruce_net": 0.039578,
+    "pct_profitable": 0.72,
+    "breakeven": false
+  },
+  {
+    "borrow_rate_pct": 2.0,
+    "slippage_bps_per_leg": 20.0,
+    "total_extra_cost_bps": 84.5,
+    "median_ruce_net": 0.035578,
+    "pct_profitable": 0.6974,
+    "breakeven": false
+  }
+]

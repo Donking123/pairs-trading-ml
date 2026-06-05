@@ -38,12 +38,16 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,8 +58,8 @@ log = logging.getLogger("fetch_adr")
 start_date = date(2026, 4, 30) - timedelta(days=365 * 10)
 end_date = date(2026, 4, 30)
 
-WRDS_USERNAME = "nglei2025"
-WRDS_PASSWORD = "Police@123456789"
+WRDS_USERNAME = os.environ["WRDS_USERNAME"]
+WRDS_PASSWORD = os.environ.get("WRDS_PASSWORD")
 
 # -----------------------------------------------------------------------------
 # WRDS SQL (verbatim — keep this script independent of src/)

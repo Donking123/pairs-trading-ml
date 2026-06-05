@@ -53,6 +53,9 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,7 +66,7 @@ log = logging.getLogger("fetch_fx")
 start_date = date(2026, 4, 30) - timedelta(days=365 * 10)
 end_date = date(2026, 4, 30)
 
-WRDS_USERNAME = os.environ.get("WRDS_USERNAME", "nglei2025")
+WRDS_USERNAME = os.environ["WRDS_USERNAME"]
 WRDS_PASSWORD = os.environ.get("WRDS_PASSWORD")
 
 # Pre-euro legacy currencies superseded by EUR in 1999-2002, plus the old

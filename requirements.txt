@@ -1,0 +1,15 @@
+# Asian ADR pairs-trading strategy — Python dependencies
+# Install into the project venv:
+#     ./venv/bin/pip install -r requirements.txt
+
+# --- core analysis (needed for screening, backtest, walk-forward) ---
+pandas>=2.0
+numpy>=1.24
+statsmodels>=0.14      # ADF cointegration test
+arch>=6.0              # Phillips-Perron test (screening falls back to ADF if missing)
+pyarrow>=14.0          # parquet read/write engine
+
+# --- data ingestion only (the datastream/fetch_*.py scripts) ---
+# Requires WRDS credentials; not needed to run screening/backtest on cached parquet.
+wrds>=3.1
+python-dotenv>=1.0

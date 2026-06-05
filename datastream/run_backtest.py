@@ -94,6 +94,7 @@ class Pair:
     kc: float = 0.0
     roll_spread_adr: float = 0.0
     roll_spread_local: float = 0.0
+    borrow_rate: float = 0.01             # annualised ADR short borrow cost (default 1%)
 
 
 @dataclass
@@ -112,9 +113,14 @@ class Trade:
     adr_return: float
     roce: float
     ruce: float
-    roll_cost_pct: float
-    roce_net: float
-    ruce_net: float
+    roll_cost_pct: float          # bid-ask round-trip (both legs), already baked into effective prices
+    borrow_cost: float            # ADR short borrow, prorated by duration
+    fx_open: float                # FX rate at local leg entry
+    fx_close: float               # FX rate at local leg exit
+    fx_pnl: float                 # FX move embedded in local leg (diagnostic; already inside ruce)
+    roce_net: float               # roce - borrow (roll already in effective prices)
+    ruce_net: float               # ruce - borrow (roll already in effective prices); includes FX
+    ruce_net_fx: float            # FX-hedged ruce_net (local leg in local ccy); ruce_net - ruce_net_fx = FX contribution
     close_reason: CloseReason
     was_aborted: bool
 
@@ -124,9 +130,11 @@ class PairState:
     position: HSPosition = HSPosition.FLAT
     spread_history: list[float] = field(default_factory=list)
     # Trade-in-flight tracking
-    entry_date: Optional[date] = None
-    adr_open_price: float = 0.0           # USD
-    local_open_price_usd: float = 0.0
+    entry_date: Optional[date] = None     # day D: ADR shorted
+    local_open_date: Optional[date] = None  # day D+1: local bought
+    adr_open_price: float = 0.0           # USD, filled at day D close
+    local_open_price_usd: float = 0.0     # USD, filled at day D+1 close
+    fx_open: float = 0.0                  # FX rate at day D+1 (local leg entry)
 
 
 # -----------------------------------------------------------------------------
@@ -253,37 +261,76 @@ def _next_index(idx_arr: np.ndarray, i: int) -> int:
     return min(i + 1, len(idx_arr) - 1)
 
 
-def backtest_pair(pair: Pair, df: pd.DataFrame, cfg: dict) -> list[Trade]:
+def backtest_pair(
+    pair: Pair,
+    df: pd.DataFrame,
+    cfg: dict,
+    start: Optional[date] = None,
+    end: Optional[date] = None,
+) -> list[Trade]:
     """
-    Single-pair event loop.
+    Single-pair event loop with realistic execution modelling.
 
-    Bars (daily). Day i processes U.S. close. The "next Asia open" leg is
-    modelled by inspecting the spread on day i+1 (next-bar fill rule).
+    Two-bar fill (points 1-2):
+        Day D U.S. close  -> SHORT ADR at adr_close[D]. Roll cost (ADR half)
+                             deducted upfront from the ADR leg.
+        Day D+1 Asia open -> If spread still above kappa_close: BUY local at
+                             local_close_usd[D+1]. Roll cost (local half) deducted
+                             upfront. FX rate recorded. Position = OPEN.
+                             Else: overnight abort — cover ADR at adr_close[D+1].
+
+    Borrow cost (point 3):
+        Annualised rate ``pair.borrow_rate`` prorated by duration_days/365.
+        Applied to closed round-trips only (not aborts).
+
+    FX P&L (point 4):
+        Local prices are stored in USD, so the FX move is ALREADY inside the
+        local-leg return (and hence inside roce/ruce/ruce_net). ``fx_pnl`` is
+        reported only as a diagnostic of that embedded component. ``ruce_net_fx``
+        is the FX-HEDGED variant (local leg re-priced in local currency), so
+        ``ruce_net - ruce_net_fx`` isolates the FX contribution.
+
+    ``start`` / ``end`` restrict the trading window. Rolling stats are computed
+    over the FULL supplied df so the bars at/after ``start`` already have warmed-up
+    mu/sigma from pre-start history (walk-forward discipline); only entry into new
+    trades is gated to the [start, end] window, never the warm-up data itself.
     """
     trades: list[Trade] = []
+    # Clip only the END of the data (no future bars), but keep ALL pre-start
+    # history so rolling stats are warm by the time trading is allowed to start.
+    if end is not None:
+        df = df[df.index <= pd.Timestamp(end)]
     if len(df) < pair.estimation_days + 5:
         return trades
 
-    spreads = df["spread"].to_numpy()
+    spreads  = df["spread"].to_numpy()
     adr_close = df["adr_close"].to_numpy()
     local_usd = df["local_close_usd"].to_numpy()
+    fx_rates  = df["fx_mid"].to_numpy()
     dates = df.index.to_pydatetime() if hasattr(df.index, "to_pydatetime") else df.index
     if isinstance(dates, np.ndarray):
         dates = [pd.Timestamp(d).date() for d in dates]
     else:
         dates = [d.date() if hasattr(d, "date") else d for d in dates]
 
+    # Trading window: entries are only opened on bars at/after `start`. Warm-up
+    # bars before `start` still feed the rolling stats above.
+    start_date = pd.Timestamp(start).date() if start is not None else None
+
     mu, sd = rolling_mean_std(spreads, pair.estimation_days)
     k0 = pair.k0
     kc = pair.kc
 
+    # Split roll cost evenly between entry and exit, one half per leg
+    half_roll_adr   = float(pair.roll_spread_adr)   / 2.0
+    half_roll_local = float(pair.roll_spread_local) / 2.0
+    roll_cost_pct   = float(pair.roll_spread_adr + pair.roll_spread_local)
+
     state = PairState()
     n = len(df)
-    roll_cost_pct = float(pair.roll_spread_adr + pair.roll_spread_local)
 
     i = 0
     while i < n:
-        # Skip warm-up bars
         if np.isnan(mu[i]) or np.isnan(sd[i]) or sd[i] == 0:
             i += 1
             continue
@@ -292,33 +339,44 @@ def backtest_pair(pair: Pair, df: pd.DataFrame, cfg: dict) -> list[Trade]:
         kappa_close = mu[i] + kc * sd[i]
         spread_i = spreads[i]
 
+        # ── FLAT: look for entry ──────────────────────────────────────────────
         if state.position == HSPosition.FLAT:
+            # Only open new trades inside the trading window; pre-start bars are
+            # warm-up only. Already-open trades are still allowed to close below.
+            if start_date is not None and dates[i] < start_date:
+                i += 1
+                continue
             if spread_i > kappa_open:
-                # SHORT_ADR at today's close (day D)
-                state.position = HSPosition.AWAITING_LOCAL
-                state.adr_open_price = float(adr_close[i])
-                state.entry_date = dates[i]
+                # Day D: SHORT ADR at close. ADR entry roll cost deducted upfront
+                # (widens effective short price by half_roll_adr).
+                adr_open_eff = float(adr_close[i]) * (1.0 + half_roll_adr)
+                state.position      = HSPosition.AWAITING_LOCAL
+                state.adr_open_price = adr_open_eff
+                state.entry_date    = dates[i]
 
-                # Day D+1 (next bar) — Asia open recheck
-                j = _next_index(np.arange(n), i)
-                if j == i:
-                    # No next bar — abort immediately, no trade recorded
+                # Day D+1: check if local leg can be entered
+                j = i + 1
+                if j >= n:
                     state.position = HSPosition.FLAT
                     i += 1
                     continue
 
-                spread_open_d1 = spreads[j]
-                if spread_open_d1 > kappa_close:
-                    # BUY local at next bar
-                    state.position = HSPosition.OPEN
-                    state.local_open_price_usd = float(local_usd[j])
-                    i = j  # advance to D+1
+                spread_d1 = spreads[j]
+                if spread_d1 > kappa_close:
+                    # BUY local at D+1 close. Local entry roll cost deducted upfront
+                    # (raises effective buy price by half_roll_local).
+                    loc_open_eff = float(local_usd[j]) * (1.0 + half_roll_local)
+                    state.position             = HSPosition.OPEN
+                    state.local_open_price_usd = loc_open_eff
+                    state.local_open_date      = dates[j]
+                    state.fx_open              = float(fx_rates[j])
+                    i = j
                 else:
-                    # Overnight abort: BUY ADR cover, no local leg
-                    adr_cover = float(adr_close[j])
-                    adr_ret = (state.adr_open_price - adr_cover) / state.adr_open_price
-                    roce = 0.0 + adr_ret
-                    ruce = 0.0 + 2.0 * adr_ret
+                    # Overnight abort: cover ADR at D+1 close (+ exit roll on ADR)
+                    adr_cover_eff = float(adr_close[j]) * (1.0 - half_roll_adr)
+                    adr_ret = (state.adr_open_price - adr_cover_eff) / state.adr_open_price
+                    roce = adr_ret
+                    ruce = 2.0 * adr_ret
                     trades.append(Trade(
                         pair_id=pair.pair_id,
                         adr_ticker=pair.adr_ticker,
@@ -327,7 +385,7 @@ def backtest_pair(pair: Pair, df: pd.DataFrame, cfg: dict) -> list[Trade]:
                         close_date=dates[j],
                         duration_days=1,
                         adr_open_price=state.adr_open_price,
-                        adr_cover_price=adr_cover,
+                        adr_cover_price=adr_cover_eff,
                         local_open_price_usd=0.0,
                         local_close_price_usd=0.0,
                         local_return=0.0,
@@ -335,8 +393,13 @@ def backtest_pair(pair: Pair, df: pd.DataFrame, cfg: dict) -> list[Trade]:
                         roce=roce,
                         ruce=ruce,
                         roll_cost_pct=roll_cost_pct,
-                        roce_net=roce - roll_cost_pct,
-                        ruce_net=ruce - roll_cost_pct,
+                        borrow_cost=0.0,
+                        fx_open=0.0,
+                        fx_close=0.0,
+                        fx_pnl=0.0,
+                        roce_net=roce,   # roll already in effective prices
+                        ruce_net=ruce,
+                        ruce_net_fx=ruce,
                         close_reason=CloseReason.OVERNIGHT_ABORT,
                         was_aborted=True,
                     ))
@@ -344,20 +407,51 @@ def backtest_pair(pair: Pair, df: pd.DataFrame, cfg: dict) -> list[Trade]:
                     i = j + 1
                     continue
 
+        # ── OPEN: look for exit ───────────────────────────────────────────────
         elif state.position == HSPosition.OPEN:
+            # Duration is measured from entry_date (day D, when the ADR short and
+            # its borrow begin) so it is consistent with the reported open_date and
+            # charges borrow over the whole period the short is held.
             days_held = (dates[i] - state.entry_date).days
             should_close = (spread_i < kappa_close) or (days_held >= pair.holding_days)
             if should_close:
                 reason = (CloseReason.FORCE_CLOSE if days_held >= pair.holding_days
                           else CloseReason.CONVERGENCE)
-                # Close at bar i (sell local, cover ADR same bar in backtest mode)
-                adr_cover = float(adr_close[i])
-                loc_close = float(local_usd[i])
 
-                local_ret = (loc_close - state.local_open_price_usd) / state.local_open_price_usd
-                adr_ret   = (state.adr_open_price - adr_cover) / state.adr_open_price
+                # Exit roll costs deducted upfront from effective close prices
+                adr_cover_eff = float(adr_close[i]) * (1.0 - half_roll_adr)
+                loc_close_eff = float(local_usd[i]) * (1.0 - half_roll_local)
+                fx_close_val  = float(fx_rates[i])
+
+                local_ret = (loc_close_eff - state.local_open_price_usd) / state.local_open_price_usd
+                adr_ret   = (state.adr_open_price - adr_cover_eff) / state.adr_open_price
                 roce = local_ret + adr_ret
                 ruce = local_ret + 2.0 * adr_ret
+
+                # Borrow cost: annualised rate prorated by holding period
+                borrow_cost = pair.borrow_rate * (days_held / 365.0)
+
+                # FX move embedded in the (USD) local leg, reported for transparency:
+                # local prices are USD (local_close_usd = local_close * fx_mid), so
+                # local_ret ALREADY contains this — it is not added on top.
+                fx_pnl = (fx_close_val - state.fx_open) / state.fx_open if state.fx_open > 0 else 0.0
+
+                roce_net = roce - borrow_cost   # roll already in effective prices
+                ruce_net = ruce - borrow_cost
+
+                # FX-hedged RUCE: re-price the long local leg in LOCAL currency
+                # (strip the FX move) so (ruce_net − ruce_net_fx) isolates the FX
+                # contribution. Divide the effective USD prices back out by their
+                # entry/exit FX rates.
+                if state.fx_open > 0 and fx_close_val > 0:
+                    loc_open_local  = state.local_open_price_usd / state.fx_open
+                    loc_close_local = loc_close_eff / fx_close_val
+                    local_ret_ex_fx = (loc_close_local - loc_open_local) / loc_open_local
+                    ruce_ex_fx      = local_ret_ex_fx + 2.0 * adr_ret
+                    ruce_net_fx     = ruce_ex_fx - borrow_cost
+                else:
+                    ruce_net_fx = ruce_net
+
                 trades.append(Trade(
                     pair_id=pair.pair_id,
                     adr_ticker=pair.adr_ticker,
@@ -366,16 +460,21 @@ def backtest_pair(pair: Pair, df: pd.DataFrame, cfg: dict) -> list[Trade]:
                     close_date=dates[i],
                     duration_days=days_held,
                     adr_open_price=state.adr_open_price,
-                    adr_cover_price=adr_cover,
+                    adr_cover_price=adr_cover_eff,
                     local_open_price_usd=state.local_open_price_usd,
-                    local_close_price_usd=loc_close,
+                    local_close_price_usd=loc_close_eff,
                     local_return=local_ret,
                     adr_return=adr_ret,
                     roce=roce,
                     ruce=ruce,
                     roll_cost_pct=roll_cost_pct,
-                    roce_net=roce - roll_cost_pct,
-                    ruce_net=ruce - roll_cost_pct,
+                    borrow_cost=round(borrow_cost, 6),
+                    fx_open=state.fx_open,
+                    fx_close=fx_close_val,
+                    fx_pnl=round(fx_pnl, 6),
+                    roce_net=roce_net,
+                    ruce_net=ruce_net,
+                    ruce_net_fx=ruce_net_fx,
                     close_reason=reason,
                     was_aborted=False,
                 ))
@@ -428,9 +527,13 @@ def build_report(trades: list[Trade], pairs: list[Pair], cfg: dict) -> dict:
                       ("RUCE per trade", "ruce"),
                       ("ROCE net per trade", "roce_net"),
                       ("RUCE net per trade", "ruce_net"),
+                      ("RUCE net+FX per trade", "ruce_net_fx"),
                       ("Duration (days)", "duration_days"),
-                      ("Roll cost (round trip)", "roll_cost_pct")]:
-        distribution.append(distribution_row(name, df[col].to_numpy()))
+                      ("Roll cost (round trip)", "roll_cost_pct"),
+                      ("Borrow cost", "borrow_cost"),
+                      ("FX P&L", "fx_pnl")]:
+        if col in df.columns:
+            distribution.append(distribution_row(name, df[col].to_numpy()))
 
     closed = df[~df["was_aborted"]]
     aborted_count = int(df["was_aborted"].sum())
@@ -444,8 +547,11 @@ def build_report(trades: list[Trade], pairs: list[Pair], cfg: dict) -> dict:
         "abort_rate":       round(aborted_count / max(len(df), 1), 4),
         "median_roce":      round(float(closed["roce"].median()), 6) if len(closed) else None,
         "median_ruce":      round(float(closed["ruce"].median()), 6) if len(closed) else None,
-        "median_roce_net":  round(float(closed["roce_net"].median()), 6) if len(closed) else None,
-        "median_ruce_net":  round(float(closed["ruce_net"].median()), 6) if len(closed) else None,
+        "median_roce_net":      round(float(closed["roce_net"].median()), 6) if len(closed) else None,
+        "median_ruce_net":      round(float(closed["ruce_net"].median()), 6) if len(closed) else None,
+        "median_ruce_net_fx":   round(float(closed["ruce_net_fx"].median()), 6) if len(closed) else None,
+        "median_borrow_cost":   round(float(closed["borrow_cost"].median()), 6) if len(closed) else None,
+        "median_fx_pnl":        round(float(closed["fx_pnl"].median()), 6) if len(closed) else None,
         "median_duration":  round(float(closed["duration_days"].median()), 2) if len(closed) else None,
         "n_pairs_traded":   int(df["pair_id"].nunique()),
         "n_pairs_loaded":   len(pairs),

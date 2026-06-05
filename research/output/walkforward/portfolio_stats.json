@@ -1,0 +1,15 @@
+{
+  "n_days": 750,
+  "n_active_days": 391,
+  "total_return": 12.175238,
+  "annualised_return": 2.510123,
+  "annualised_vol": 0.187154,
+  "sharpe": 4.7267,
+  "sortino": 6.9061,
+  "max_drawdown": -0.101339,
+  "calmar": 24.7696,
+  "hit_rate": 0.7494,
+  "final_equity": 13.175238,
+  "metric": "ruce_net",
+  "weight": "equal"
+}

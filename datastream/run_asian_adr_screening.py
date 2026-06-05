@@ -114,6 +114,76 @@ _STANDARD_RATIOS: list[float] = [
 _LOG_STD = np.log(_STANDARD_RATIOS)
 
 
+def _snap_raw_ratio(raw: float) -> Optional[float]:
+    """Validate a raw median(local*FX/ADR) estimate and snap it to the nearest
+    standard ratio in log-space. Returns None if the raw value is non-finite or
+    outside the plausible [0.001, 1000] band. Single source of truth shared by
+    the per-pair and bulk estimators so their accept/snap rules cannot drift."""
+    if not np.isfinite(raw) or raw < 0.001 or raw > 1000:
+        return None
+    idx = int(np.argmin(np.abs(np.log(raw) - _LOG_STD)))
+    return _STANDARD_RATIOS[idx]
+
+
+def _bulk_estimate_ratios(
+    candidates: pd.DataFrame,
+    adr_prices: pd.DataFrame,
+    global_prices: pd.DataFrame,
+    fx_rates: pd.DataFrame,
+) -> pd.Series:
+    """
+    Estimate adr_ratio for every null-ratio candidate, returning a Series indexed
+    by (adr_ticker, underlying_ticker) -> estimated ratio or NaN.
+
+    Each source is pivoted once into a wide frame (date x ticker / date x ccy) so
+    the per-pair column lookups below are O(1) instead of re-scanning the long
+    tables for every candidate; the median itself is still computed per pair
+    because the joint date overlap differs from pair to pair.
+    """
+    # pivot ADR closes: index=date, columns=ticker
+    adr_wide = (adr_prices[adr_prices["ticker"].isin(candidates["adr_ticker"])]
+                .pivot_table(index="marketdate", columns="ticker", values="close", aggfunc="last"))
+    adr_wide.index = pd.to_datetime(adr_wide.index)
+
+    # pivot local closes: index=date, columns=ticker
+    loc_wide = (global_prices[global_prices["ticker"].isin(candidates["underlying_ticker"])]
+                .pivot_table(index="marketdate", columns="ticker", values="close", aggfunc="last"))
+    loc_wide.index = pd.to_datetime(loc_wide.index)
+
+    # pivot FX: index=date, columns=currency
+    fx_wide = (fx_rates.pivot_table(index="date", columns="base_currency", values="mid", aggfunc="last"))
+    fx_wide.index = pd.to_datetime(fx_wide.index)
+
+    results: dict[tuple, float] = {}
+    for _, row in candidates.iterrows():
+        adr_t = row["adr_ticker"]
+        loc_t = row["underlying_ticker"]
+        ccy   = row["underlying_currency"]
+        key   = (adr_t, loc_t)
+
+        if adr_t not in adr_wide.columns or loc_t not in loc_wide.columns or ccy not in fx_wide.columns:
+            results[key] = float("nan")
+            continue
+
+        adr_s = adr_wide[adr_t].dropna()
+        loc_s = loc_wide[loc_t].dropna()
+        fx_s  = fx_wide[ccy].dropna()
+
+        combined = pd.concat([adr_s.rename("adr"), loc_s.rename("loc"), fx_s.rename("fx")], axis=1).dropna()
+        combined = combined[(combined["adr"] > 0) & (combined["loc"] > 0) & (combined["fx"] > 0)]
+
+        if len(combined) < 30:
+            results[key] = float("nan")
+            continue
+
+        raw = (combined["loc"] * combined["fx"] / combined["adr"]).median()
+        snapped = _snap_raw_ratio(raw)
+        results[key] = float("nan") if snapped is None else snapped
+
+    return pd.Series(results, dtype=float)
+
+
+
 def _estimate_ratio_from_prices(
     adr_prices: pd.DataFrame,
     local_prices: pd.DataFrame,
@@ -141,11 +211,7 @@ def _estimate_ratio_from_prices(
         return None
 
     raw = (df["local_close"] * df["fx_mid"] / df["adr_close"]).median()
-    if not np.isfinite(raw) or raw < 0.001 or raw > 1000:
-        return None
-
-    idx = int(np.argmin(np.abs(np.log(raw) - _LOG_STD)))
-    return _STANDARD_RATIOS[idx]
+    return _snap_raw_ratio(raw)
 
 
 # -----------------------------------------------------------------------------
@@ -266,7 +332,7 @@ def screen_pair(
     pair_id = f"{adr_t}__{und_t}"
     diag = {"pair_id": pair_id, "status": "rejected", "reason": ""}
 
-    if raw_ratio is None or (isinstance(raw_ratio, float) and pd.isna(raw_ratio)):
+    if raw_ratio is None or pd.isna(raw_ratio):
         adr_s = adr_prices[adr_prices["ticker"] == adr_t][["marketdate", "close"]]
         und_s = global_prices[global_prices["ticker"] == und_t][["marketdate", "close"]]
         estimated = _estimate_ratio_from_prices(adr_s, und_s, fx_rates, ccy)
@@ -383,16 +449,91 @@ def run_pipeline(
     diagnostics: list[dict] = []
 
     asian = adr_reference[adr_reference["underlying_exchange"].isin(ASIAN_EXCHANGES)]
-    log.info("screening %d Asian-underlying ADR candidates", len(asian))
 
-    for _, row in asian.iterrows():
+    # Point-in-time filter: if the reference table has startdate/enddate columns
+    # (from fetch_pit_adr_reference.py), only keep pairs active as of `as_of`.
+    # A pair is active if: startdate <= as_of AND (enddate is NaT OR enddate >= as_of).
+    # This eliminates survivorship bias from pairs that were delisted before as_of.
+    #
+    # NaT semantics differ by column (see fetch_pit_adr_reference.py):
+    #   startdate NaT -> the pair's start is *unknown*. We cannot confirm it was
+    #     active as of `as_of`, so we conservatively EXCLUDE it (dropping it is
+    #     the survivorship-safe choice; admitting an unknown-start pair would let
+    #     it trade in periods where it may not have existed).
+    #   enddate  NaT -> the pair is still active (open-ended), so it passes the
+    #     upper-bound test.
+    if "startdate" in asian.columns and "enddate" in asian.columns:
+        as_of_ts = pd.Timestamp(as_of)
+        asian = asian.copy()
+        asian["startdate"] = pd.to_datetime(asian["startdate"])
+        asian["enddate"]   = pd.to_datetime(asian["enddate"])
+        # WRDS uses 2079-06-05 as a sentinel for "still active" instead of NULL.
+        # Treat any enddate beyond today as open-ended (active).
+        _today = pd.Timestamp.today().normalize()
+        asian["enddate_eff"] = asian["enddate"].where(asian["enddate"] <= _today, other=pd.NaT)
+        active_mask = (
+            (asian["startdate"].notna() & (asian["startdate"] <= as_of_ts)) &
+            (asian["enddate_eff"].isna() | (asian["enddate_eff"] >= as_of_ts))
+        )
+        n_before = len(asian)
+        asian = asian[active_mask].drop(columns=["enddate_eff"])
+        log.info("point-in-time filter (as_of=%s): %d -> %d pairs (dropped %d inactive)",
+                 as_of, n_before, len(asian), n_before - len(asian))
+    else:
+        log.debug("no startdate/enddate columns in reference — survivorship bias not corrected")
+
+    # Pre-filter 1: drop rows whose tickers have no price history at all.
+    known_adrs = set(adr_prices["ticker"].unique())
+    known_locals = set(global_prices["ticker"].unique())
+    asian = asian[
+        asian["adr_ticker"].isin(known_adrs) &
+        asian["underlying_ticker"].isin(known_locals)
+    ]
+
+    # Pre-filter 2: drop duplicate (adr_ticker, underlying_ticker) rows — the
+    # reference often has multiple entries for the same pair.
+    asian = asian.drop_duplicates(subset=["adr_ticker", "underlying_ticker"])
+
+    # Pre-fill null ratios in bulk (one vectorised pass) to avoid per-pair joins.
+    no_ratio_mask = asian["adr_ratio"].isna()
+    n_no_ratio = no_ratio_mask.sum()
+    log.info("screening %d candidates: %d with known ratio, %d needing ratio estimation",
+             len(asian), len(asian) - n_no_ratio, n_no_ratio)
+    if n_no_ratio > 0:
+        log.info("estimating %d missing ratios in bulk …", n_no_ratio)
+        bulk = _bulk_estimate_ratios(
+            asian[no_ratio_mask], adr_prices, global_prices, fx_rates)
+        asian = asian.copy()
+        # cast to float64 so we can write numeric values (column may be StringArray)
+        asian["adr_ratio"] = pd.to_numeric(asian["adr_ratio"], errors="coerce")
+        # Vectorised writeback: map each null-ratio row's (adr, underlying) key
+        # through the bulk Series and fill it in. combine_first leaves any pair
+        # bulk couldn't estimate (NaN) untouched, so it stays null and is dropped.
+        keys = pd.MultiIndex.from_arrays(
+            [asian.loc[no_ratio_mask, "adr_ticker"],
+             asian.loc[no_ratio_mask, "underlying_ticker"]]
+        )
+        estimated = pd.Series(keys.map(bulk).to_numpy(),
+                              index=asian.index[no_ratio_mask], dtype=float)
+        asian["adr_ratio"] = asian["adr_ratio"].combine_first(estimated)
+        log.info("bulk ratio estimation complete; %d still null (will be dropped)",
+                 asian["adr_ratio"].isna().sum())
+
+    n_candidates = len(asian)
+    for i, (_, row) in enumerate(asian.iterrows(), 1):
         result, diag = screen_pair(row, adr_prices, global_prices, fx_rates, as_of, cfg)
         diagnostics.append(diag)
-        status_marker = "PASS" if result is not None else "FAIL"
-        log.info("[%s] %s — %s", status_marker, diag["pair_id"], diag["reason"])
         if result is not None:
+            log.info("[PASS] %s — %s", diag["pair_id"], diag["reason"])
             approved.append(result)
+        else:
+            log.debug("[FAIL] %s — %s", diag["pair_id"], diag["reason"])
+        if i % 100 == 0 or i == n_candidates:
+            log.info("  screening progress: %d/%d candidates, %d approved so far",
+                     i, n_candidates, len(approved))
 
+    log.info("screening complete: %d approved, %d rejected",
+             len(approved), len(diagnostics) - len(approved))
     return approved, diagnostics
 
 
