@@ -20,6 +20,7 @@
 5.  [Technology Stack](#5-technology-stack)
 6.  [Project Structure](#6-project-structure)
 7.  [Internal APIs and Data Contracts](#7-internal-apis-and-data-contracts)
+    - 7.0 Core Types (Clock, HSPosition, Side/Venue, STANDARD_ADR_RATIOS) · 7.1–7.10 Events & Models · 7.11 Alert Events · 7.12 Exception Hierarchy
 8.  [Concurrency and Runtime Model](#8-concurrency-and-runtime-model)
 9.  [Backtesting Design](#9-backtesting-design)
 10. [Risk and Reliability](#10-risk-and-reliability)
@@ -444,7 +445,7 @@ fx_handler/
 **Eligible Asian Exchanges**
 
 ```python
-ASIAN_EXCHANGES: set[str] = {
+ASIAN_EXCHANGES: frozenset[str] = frozenset({
     "TKS", "TSE",   # Tokyo Stock Exchange (Japan) — Datastream uses both mnemonics
     "HKG",          # Hong Kong Exchange (HKEX)
     "KRX",          # Korea Exchange
@@ -456,7 +457,7 @@ ASIAN_EXCHANGES: set[str] = {
     "IDX",          # Indonesia Stock Exchange
     "PHS",          # Philippine Stock Exchange (PSE)
     "KLS",          # Bursa Malaysia
-}
+})
 ```
 
 **Pair Eligibility Criteria**
@@ -475,8 +476,8 @@ ASIAN_EXCHANGES: set[str] = {
 1. Filter adr_reference to ASIAN_EXCHANGES
 2. For each candidate pair:
    a. Resolve adr_ratio — estimate from median(P_local × FX / P_ADR), snap to nearest
-      standard ratio (0.01, 0.1, 0.5, 1, 2, 5, 10 …); reject if unresolvable
-      Note: tr_ds_equities.wrds_ds_names has no adrr column — ratio must be estimated
+      standard ratio (0.01, 0.1, 0.2, 0.25, 0.5, 1, 2, 2.5, 5, 10, 20, 50, 100);
+      reject if unresolvable. Note: tr_ds_equities.wrds_ds_names has no adrr column — ratio must be estimated
    b. Reconstruct dollar spread: P_ADR − (P_local × FX) / ratio  (β = ratio, never OLS)
    c. Trim to as_of date (no look-ahead)
    d. Apply liquidity filter: non_zero_return_pct ≥ 0.50 on both legs; ≥ 2 years trading
@@ -580,15 +581,40 @@ class HongSusmelEngine:
         return signals
 ```
 
+**Engine Implementation Note**
+
+`HongSusmelEngine.on_daily_bar` is the async bus handler (publishes signals to the bus).
+`HongSusmelEngine.evaluate` is the pure synchronous core — it returns the signals this bar
+produces without touching the bus. Unit tests use `evaluate` directly so they can assert on
+emitted signals without wiring a bus. `run()` is a no-op; the engine is purely event-driven.
+
+```python
+def evaluate(self, event: BarEvent) -> list[HongSusmelSignalEvent]:
+    """Pure, synchronous core — separated from on_daily_bar for testability."""
+    ...
+
+async def on_daily_bar(self, event: BarEvent) -> None:
+    """Bus handler: calls evaluate() and publishes results."""
+    for signal in self.evaluate(event):
+        await self._bus.publish(Topic.SIGNALS, signal)
+```
+
 **Internal Modules**
 
 ```
 strategy/hong_susmel/
 ├── engine.py               # HongSusmelEngine: spread computation, signal emission
 ├── state.py                # HSPairState: prices, rolling stats, holding-period counter
-├── signal_factory.py       # Constructs HongSusmelSignalEvent
-└── liquidity_bucket.py     # Assigns High/High-Med/Med-Low/Low bucket for attribution
+│                           # WelfordRollingStats: sliding-window sum/sumsq (bounded deque)
+├── signal_factory.py       # Constructs HongSusmelSignalEvent (SignalFactory class)
+└── liquidity_bucket.py     # assign_bucket / assign_by_zero_return / assign_by_adv
+                            # ZERO_RETURN_CUTOFFS and ADV_CUTOFFS constants
 ```
+
+**Note on WelfordRollingStats**: Despite the name, the implementation uses a sliding-window
+sum/sum-of-squares over a bounded `deque` (O(1) per update), which is the correct approach
+for a fixed-window rolling estimator. Classic Welford's algorithm is cumulative, not windowed.
+The `ddof=1` sample standard deviation matches the paper throughout.
 
 ---
 
@@ -607,21 +633,44 @@ class AbstractEventBus(Protocol):
     async def publish(self, topic: str, event: BaseEvent) -> None: ...
     async def subscribe(self, topic: str, handler: Callable) -> None: ...
     async def subscribe_many(self, topics: list[str], handler: Callable) -> None: ...
+    async def flush(self) -> None: ...    # drain queued events; used after each replayed bar in backtest
+    async def close(self) -> None: ...   # release resources (consumer tasks, broker connections)
+```
+
+**Topic Constants**
+
+Topics are accessed via the `Topic` class rather than bare string literals, keeping producers
+and consumers in sync and making typos a static error:
+
+```python
+class Topic:
+    MARKET_DATA   = "market-data"
+    FX_RATES      = "fx-rates"
+    SIGNALS       = "signals"
+    RISK_DECISIONS = "risk-decisions"
+    ORDERS        = "orders"
+    FILLS         = "fills"
+    POSITIONS     = "positions"
+    PAIR_REGISTRY = "pair-registry"
+    ALERTS        = "alerts"
+
+CRITICAL_TOPICS: frozenset[str] = frozenset({Topic.ORDERS, Topic.FILLS, Topic.RISK_DECISIONS})
+# Publishers block (rather than drop) on these topics under backpressure.
 ```
 
 **Topic Design**
 
 | Topic | Producers | Consumers |
 |-------|-----------|-----------|
-| `market-data` | Market Data Handler | H&S Engine, Position Engine |
-| `fx-rates` | FX Rate Feed | H&S Engine, Position Engine |
-| `signals` | H&S Engine | Risk Engine |
-| `risk-decisions` | Risk Engine | Asian Execution Sequencer |
-| `orders` | Asian Execution Sequencer | Broker Gateway, Monitoring |
+| `market-data` | Market Data Handler | H&S Engine, Position Engine, Sequencer, Simulated Exchanges |
+| `fx-rates` | FX Rate Feed | H&S Engine, Position Engine, Sequencer, Foreign Exchange |
+| `signals` | H&S Engine | Risk Engine, ROCE/RUCE Calculator, signal cache (backtest router) |
+| `risk-decisions` | Risk Engine | Backtest router → Sequencer (approved signals forwarded) |
+| `orders` | Asian Execution Sequencer | Broker Gateway / Simulated Exchanges |
 | `fills` | Broker Gateway | Sequencer, Position Engine, ROCE/RUCE Calculator |
 | `positions` | Position Engine | Risk Engine, Dashboard |
-| `pair-registry` | Research Engine | H&S Engine, Risk Engine |
-| `alerts` | Risk, Feed, Sequencer | Monitoring, Dashboard |
+| `pair-registry` | Backtest replay loop / Research Engine | H&S Engine |
+| `alerts` | Risk, Feed, Sequencer, Position Engine | Monitoring, Dashboard |
 
 **Implementations**
 
@@ -644,67 +693,108 @@ event_bus/
 - Detect FX conversion data staleness; suspend affected pairs
 - Trigger kill switch on breach of critical thresholds
 
+**Risk Framework Classes**
+
+```python
+class RiskConfig(BaseModel):
+    """Pre-trade risk limits (architecture §10.2 defaults)."""
+    max_open_pairs: int = 20
+    max_notional_per_leg: Decimal = Decimal("100000")
+    max_gross_notional: Decimal = Decimal("2000000")
+    max_zero_return_pct: Decimal = Decimal("0.50")
+    max_holding_days: int = 90
+    max_daily_loss_pct: Decimal = Decimal("0.02")        # fraction of AUM
+    max_drawdown_pct: Decimal = Decimal("0.05")          # kill-switch threshold
+    require_short_locate: bool = True
+    rate_of_loss_limit: Decimal = Decimal("25000")       # dollars
+    rate_of_loss_bars: int = 30
+    max_country_concentration_pct: Decimal = Decimal("0.30")
+    aum_usd: Decimal = Decimal("1000000")
+    entry_notional_usd: Decimal = Decimal("100000")      # notional granted per approved entry
+
+
+@dataclass(frozen=True)
+class RiskContext:
+    """Immutable portfolio snapshot assembled by RiskEngine for each signal."""
+    config: RiskConfig
+    pair: AsianADRApprovedPair | None
+    proposed_notional: Decimal
+    zero_return_pct: Decimal          # injected from H&S engine state
+    open_pairs: int
+    gross_notional_usd: Decimal
+    country: str | None
+    country_notional_usd: Decimal
+    daily_pnl_usd: Decimal
+    drawdown_pct: Decimal
+    loss_window_usd: Decimal          # signed; negative = loss
+    short_locate_available: bool
+    kill_switch_active: bool
+    days_held: int
+
+
+class RiskRuleResult(BaseModel):
+    """Outcome of a single rule evaluation."""
+    rule: str
+    passed: bool
+    reason: str = ""
+    severity: Severity = Severity.INFO    # INFO | WARN | BLOCK | KILL
+
+    @property
+    def is_blocking(self) -> bool:
+        return not self.passed and self.severity >= Severity.BLOCK
+
+
+class AbstractRiskRule(ABC):
+    """Uniform interface for every risk rule — single evaluate() signature."""
+    name: str
+
+    @abstractmethod
+    def evaluate(
+        self, signal: HongSusmelSignalEvent | None, ctx: RiskContext
+    ) -> RiskRuleResult: ...
+```
+
+All rules share the same `evaluate(signal, ctx) -> RiskRuleResult` signature. This uniform
+interface lets the engine run rules as a homogeneous pipeline and makes them composable.
+`zero_return_pct` is injected via a `zero_return_provider` callable wired from the H&S engine
+state; `short_locate_available` is injected via a `short_locate_provider` callable. The risk
+engine never imports `strategy` or `gateways` directly.
+
 **Risk Rules**
 
 ```
 risk/rules/
-├── base.py
-├── notional_limits.py           # Max per-leg and portfolio notional
+├── base.py                      # Severity, RiskConfig, RiskContext, RiskRuleResult, AbstractRiskRule
+├── notional_limits.py           # MaxOpenPairsRule, NotionalLimitsRule
 ├── drawdown_limits.py           # Daily and peak-to-trough drawdown
 ├── rate_of_loss.py              # Max dollar loss per N bars
-├── holding_period_force_close.py# Force-close at H days
+├── holding_period_force_close.py# Force-close at H days (handled by H&S engine; rule is advisory)
 ├── zero_return_day_filter.py    # Block entry if ADR zero-return pct > threshold
 ├── overnight_abort_cover.py     # Cover naked ADR short if local leg never filled
 ├── short_locate.py              # Verify ADR short-locate before SELL
 ├── country_concentration.py     # Max exposure per country
-└── kill_switch.py
-```
-
-**Holding Period Force-Close Rule**
-
-```python
-class HoldingPeriodForceCloseRule(AbstractRiskRule):
-    """
-    Triggers FORCE_CLOSE if a pair has been held longer than holding_days.
-    Hard stop independent of spread level.
-    """
-    def evaluate(self, state: HSPairState, pair: AsianADRApprovedPair) -> bool:
-        days_held = (self._clock.date() - state.entry_date).days
-        return days_held >= pair.holding_days
+└── kill_switch.py               # KillSwitch class + KillSwitchRule
 ```
 
 **Zero Return Day Filter**
 
 ```python
 class ZeroReturnDayFilter(AbstractRiskRule):
-    """
-    Blocks new entries for pairs whose ADR zero-return-day percentage over
-    the estimation window exceeds the configured ceiling.
-    Prevents stale-price false signals from illiquid ADRs.
-    """
-    def evaluate(
-        self, signal: HongSusmelSignalEvent, state: HSPairState, config: RiskConfig
-    ) -> RiskRuleResult:
-        zero_pct = state.rolling_zero_return_pct()
-        if zero_pct > config.max_zero_return_pct:
-            return RiskRuleResult(
-                passed=False,
-                reason=f"ADR zero-return {zero_pct:.1%} exceeds limit {config.max_zero_return_pct:.1%}",
-                severity=Severity.BLOCK,
+    """Blocks new entries when ADR zero-return-day percentage exceeds the ceiling."""
+    def evaluate(self, signal, ctx: RiskContext) -> RiskRuleResult:
+        if ctx.zero_return_pct > ctx.config.max_zero_return_pct:
+            return RiskRuleResult.block(
+                "zero_return_day_filter",
+                f"ADR zero-return {ctx.zero_return_pct:.1%} exceeds "
+                f"limit {ctx.config.max_zero_return_pct:.1%}",
             )
-        return RiskRuleResult(passed=True)
+        return RiskRuleResult.ok("zero_return_day_filter")
 ```
 
-**Overnight Abort Cover Rule**
+**Default rule pipeline order** (cheapest / hardest stops first):
+`KillSwitchRule → ShortLocateRule → ZeroReturnDayFilter → MaxOpenPairsRule → NotionalLimitsRule → CountryConcentrationRule → DrawdownLimitsRule → RateOfLossRule`
 
-```python
-class OvernightAbortCoverRule(AbstractRiskRule):
-    """
-    If the ADR leg filled (short) but the spread reversed overnight and no
-    local leg was placed, automatically covers the naked ADR short.
-    Prevents one-sided inventory from overnight gap reversals.
-    """
-```
+Closing trades (`EXIT` / `FORCE_CLOSE`) bypass the pipeline and are always approved.
 
 **Pre-Trade Limits**
 
@@ -762,39 +852,58 @@ class PositionEngine:
 
 **State Machine**
 
+The sequencer has four phases to model the overnight gap precisely:
+
 ```
 IDLE
-  ──▶ on SHORT_ADR signal:
+  ──▶ on SHORT_ADR signal (risk-approved):
         submit SELL_ADR (U.S. close bar)
         transition → AWAITING_LOCAL
 
-AWAITING_LOCAL
-  ──▶ on ADR fill confirmed + next Asia bar arrives:
-        recompute spread vs κ_close
+AWAITING_LOCAL   [waiting for the ADR short fill to confirm]
+  ──▶ on ADR fill (side=sell, venue=us_equity):
+        record adr_fill; arm Asia-open recheck
+        transition → AWAITING_ASIA_OPEN
+
+AWAITING_ASIA_OPEN   [ADR filled; waiting for next Asian underlying bar]
+  ──▶ on underlying bar (venue=foreign_equity):
+        recompute spread at Asia open price vs κ_close
         if spread > κ_close    →  submit BUY_LOCAL  →  transition OPEN
-        if spread reversed     →  submit BUY_ADR cover (abort) → IDLE
+        if spread reversed     →  submit BUY_ADR cover (abort)
                                   publish AdrOvernightAbortEvent
+                                  transition → IDLE
 
 OPEN
   ──▶ on EXIT or FORCE_CLOSE signal:
         submit SELL_LOCAL (Asia bar)
         submit BUY_ADR cover (same or next U.S. bar)
-        transition → IDLE
+        transition → IDLE (reset)
 ```
+
+> `AWAITING_LOCAL` guards the ADR fill; `AWAITING_ASIA_OPEN` guards the spread recheck.
+> Conflating them would allow the recheck to fire before the ADR fill is confirmed.
 
 **Implementation**
 
 ```python
 class AsianExecutionSequencer:
     async def on_signal(self, event: HongSusmelSignalEvent) -> None:
-        state = self._states[event.pair_id]
+        """Dispatch: SHORT_ADR → _on_entry_signal; EXIT/FORCE_CLOSE → on_exit_signal."""
+        if event.signal == HSSignal.SHORT_ADR:
+            await self._on_entry_signal(event)
+        elif event.signal in (HSSignal.EXIT, HSSignal.FORCE_CLOSE):
+            await self.on_exit_signal(event)
 
-        if event.signal == HSSignal.SHORT_ADR and state.phase == SeqPhase.IDLE:
-            await self._submit_sell_adr(event)
+    async def _on_entry_signal(self, event: HongSusmelSignalEvent) -> None:
+        state = self._states.get(event.pair_id)
+        if state is None or state.phase != SeqPhase.IDLE:
+            return
+        submitted = await self._submit_sell_adr(event)
+        if submitted:
             state.transition(SeqPhase.AWAITING_LOCAL, signal_event=event)
 
     async def on_fill(self, fill: FillEvent) -> None:
-        state = self._states.get(fill.pair_id)
+        state = self._states.get(fill.pair_id) if fill.pair_id else None
         if state is None or state.phase != SeqPhase.AWAITING_LOCAL:
             return
         if fill.ticker != state.adr_ticker or fill.side != "sell":
@@ -803,40 +912,51 @@ class AsianExecutionSequencer:
         state.transition(SeqPhase.AWAITING_ASIA_OPEN)
 
     async def on_bar(self, event: BarEvent) -> None:
-        for pair_id, state in self._states.items():
-            if state.phase != SeqPhase.AWAITING_ASIA_OPEN:
-                continue
-            if event.ticker != self._pairs[pair_id].underlying_ticker:
-                continue
-            fx_rate = self._fx_cache.get_usd_rate(self._pairs[pair_id].underlying_currency)
-            spread  = (state.adr_fill.fill_price
-                       - event.open * fx_rate / self._pairs[pair_id].adr_ratio)
-
-            if spread > state.signal_event.kappa_close:
-                await self._submit_buy_local(pair_id, event)
-                state.transition(SeqPhase.OPEN)
-            else:
-                await self._submit_adr_cover(pair_id)
-                state.transition(SeqPhase.IDLE)
-                await self._bus.publish("alerts", AdrOvernightAbortEvent(pair_id=pair_id))
+        # Cache close price for order sizing.
+        self._last_price[event.ticker] = event.close
+        pair_id = self._ticker_to_pair.get(event.ticker)
+        if pair_id is None:
+            return
+        state = self._states[pair_id]
+        if state.phase != SeqPhase.AWAITING_ASIA_OPEN:
+            return
+        pair = self._pairs[pair_id]
+        if event.ticker != pair.underlying_ticker:
+            return
+        fx_rate = self._usd_rate(pair.underlying_currency)
+        if fx_rate is None:
+            return
+        spread = state.adr_fill.fill_price - (event.open * fx_rate / pair.adr_ratio)
+        if spread > state.signal_event.kappa_close:
+            await self._submit_buy_local(pair, state, event.open)
+            state.transition(SeqPhase.OPEN)
+        else:
+            await self._submit_adr_cover(pair, state, reason="overnight_abort")
+            await self._bus.publish(Topic.ALERTS, AdrOvernightAbortEvent(..., pair_id=pair_id))
+            state.reset()
 
     async def on_exit_signal(self, event: HongSusmelSignalEvent) -> None:
-        if event.signal not in (HSSignal.EXIT, HSSignal.FORCE_CLOSE):
+        state = self._states.get(event.pair_id)
+        if state is None or state.phase != SeqPhase.OPEN:
             return
-        state = self._states[event.pair_id]
-        if state.phase != SeqPhase.OPEN:
-            return
-        await self._submit_sell_local(event.pair_id)
-        await self._submit_adr_cover(event.pair_id)
-        state.transition(SeqPhase.IDLE)
+        pair = self._pairs[event.pair_id]
+        reason = "force_close" if event.signal == HSSignal.FORCE_CLOSE else "exit"
+        await self._submit_sell_local(pair, state, reason=reason)
+        await self._submit_adr_cover(pair, state, reason=reason)
+        state.reset()
 ```
+
+Local-leg quantity is sized as `adr_qty × pair.adr_ratio` (exact hedge). ADR-leg quantity is
+sized as `floor(notional_per_leg / last_adr_price)`. `state.reset()` returns the phase to
+`IDLE` and clears `adr_fill` and `signal_event`.
 
 **Internal Modules**
 
 ```
 strategy/hong_susmel/
 ├── execution_sequencer.py    # AsianExecutionSequencer state machine
-└── sequencer_state.py        # SeqPhase enum, per-pair mutable state
+└── sequencer_state.py        # SeqPhase enum (IDLE/AWAITING_LOCAL/AWAITING_ASIA_OPEN/OPEN)
+                              # SequencerState dataclass; AdrOvernightAbortEvent
 ```
 
 ---
@@ -881,48 +1001,56 @@ gateways/
 ### 3.11 ROCE / RUCE Calculator
 
 **Responsibilities**
-- Subscribe to closed round-trip fill pairs (ADR fill + local fill)
+- Subscribe to `signals` to record whether the next close is a force-close (vs. normal exit)
+- Subscribe to `fills` and assemble per-pair round-trips from the fill stream
 - Compute ROCE and RUCE per trade as per §2.4
+- Handle the overnight-abort case: an ADR short covered with no local leg yields `local_return = 0`
 - Tag each trade with a `LiquidityBucket` for post-hoc attribution
 - Accumulate per-pair and aggregate distribution statistics matching paper Table 7-B format
 - Integrated into the backtest tearsheet
 
+The calculator assembles round-trips incrementally from the fill stream via an `_OpenTrip`
+accumulator keyed by `pair_id`. The ADR cover fill (US, side=buy) closes the round-trip:
+
 ```python
 class RoceRuceCalculator:
-    def on_round_trip_closed(
-        self,
-        adr_short_fill:  FillEvent,
-        adr_cover_fill:  FillEvent,
-        local_buy_fill:  FillEvent,
-        local_sell_fill: FillEvent,
-    ) -> RoceRuceResult:
-        p_adr_open  = adr_short_fill.fill_price
-        p_adr_close = adr_cover_fill.fill_price
-        p_loc_open  = local_buy_fill.fill_price_usd
-        p_loc_close = local_sell_fill.fill_price_usd
+    async def on_signal(self, signal: HongSusmelSignalEvent) -> None:
+        """Track whether the next close for this pair is a force-close."""
+        if signal.signal == HSSignal.FORCE_CLOSE:
+            self._force_close_pending[signal.pair_id] = True
+        elif signal.signal == HSSignal.EXIT:
+            self._force_close_pending[signal.pair_id] = False
 
-        local_return = (p_loc_close - p_loc_open) / p_loc_open
-        adr_return   = (p_adr_open  - p_adr_close) / p_adr_open   # profit when ADR falls
+    async def on_fill(self, fill: FillEvent) -> None:
+        """Accumulate fills; finalize and emit RoceRuceResult when ADR cover arrives."""
+        trip = self._open.setdefault(fill.pair_id, _OpenTrip())
+        if fill.venue == US_EQUITY and fill.side == "sell":
+            trip.adr_short = fill
+        elif fill.venue == FOREIGN_EQUITY and fill.side == "buy":
+            trip.local_buy = fill
+        elif fill.venue == FOREIGN_EQUITY and fill.side == "sell":
+            trip.local_sell = fill
+        elif fill.venue == US_EQUITY and fill.side == "buy":
+            # ADR cover closes the round-trip (full or aborted)
+            result = self._finalize(fill.pair_id, trip, cover=fill)
+            self._open.pop(fill.pair_id, None)
+            if result is not None:
+                self.results.append(result)
 
+    def _finalize(self, pid, trip, cover) -> RoceRuceResult | None:
+        adr_return = (trip.adr_short.fill_price - cover.fill_price) / trip.adr_short.fill_price
+        if trip.local_buy is None:
+            # overnight abort — only ADR leg traded
+            local_return, aborted = Decimal("0"), True
+        else:
+            loc_open  = trip.local_buy.fill_price_usd
+            loc_close = trip.local_sell.fill_price_usd if trip.local_sell else loc_open
+            local_return = (loc_close - loc_open) / loc_open
+            aborted = False
         roce = local_return + adr_return
-        ruce = local_return + Decimal("2") * adr_return            # 0.5× denom = 2× return
-
-        duration_days = (
-            local_sell_fill.timestamp_exchange.date()
-            - local_buy_fill.timestamp_exchange.date()
-        ).days
-
-        return RoceRuceResult(
-            pair_id=adr_short_fill.pair_id,
-            roce=roce,
-            ruce=ruce,
-            local_return=local_return,
-            adr_return=adr_return,
-            duration_days=duration_days,
-            liquidity_bucket=self._assign_bucket(adr_short_fill.pair_id),
-            was_force_closed=adr_cover_fill.metadata.get("reason") == "force_close",
-            was_aborted=False,
-        )
+        ruce = local_return + Decimal("2") * adr_return
+        # net figures subtract the pair's Roll round-trip cost estimate
+        return RoceRuceResult(roce=roce, ruce=ruce, ..., was_aborted=aborted)
 ```
 
 **Distribution statistics computed per run** (matching paper Table 7-B):
@@ -945,36 +1073,95 @@ class RoceRuceCalculator:
 - Apply realistic cost model: commission, SEC fee, short borrow, local levy
 - Produce tearsheet with ROCE/RUCE distributions, Sharpe, max drawdown, per-pair attribution
 
+**BacktestConfig**
+
+```python
+@dataclass
+class BacktestConfig:
+    risk_config: RiskConfig = field(default_factory=RiskConfig)
+    cost_model: EquitiesCostModel = field(default_factory=EquitiesCostModel)
+    us_slippage: SlippageModel | None = None
+    foreign_slippage: SlippageModel | None = None
+    notional_per_leg: Decimal = Decimal("100000")
+    param_overrides: dict = field(default_factory=dict)
+    # param_overrides accepts: k0, kc, estimation_days, holding_days,
+    # approved_date, expiry_date — lets a reproduction run override registry dates
+```
+
 **Multi-Feed Replay Loop**
 
 ```python
 class BacktestEngine:
-    async def run(self, start: date, end: date):
+    @classmethod
+    def from_parquet(cls, config, *, adr_prices, global_prices, fx_rates, pairs_json):
+        """Convenience constructor wiring Parquet-backed loaders."""
+        ...
+
+    async def run(self, start: date, end: date) -> list[RoceRuceResult]:
         bus   = MemoryBus()
         clock = SimulatedClock(start)
 
-        pair_registry  = self.pair_registry_loader.load_as_of(start)
-        hs_engine      = HongSusmelEngine(bus, clock, pair_registry)
-        risk           = RiskEngine(bus, clock, self.risk_config)
-        position       = PositionEngine(bus, clock)
-        sequencer      = AsianExecutionSequencer(bus, clock)
-        us_exchange    = SimulatedUSExchange(bus, clock, self.us_cost_model)
-        foreign_exch   = SimulatedForeignExchange(bus, clock, self.foreign_cost_model)
-        roce_ruce      = RoceRuceCalculator(bus, clock, pair_registry)
+        all_pairs = self._apply_overrides(self._registry_loader.all_pairs)
+        hs     = HongSusmelEngine(bus, clock, active)
+        risk   = RiskEngine(bus, clock, config.risk_config, all_pairs,
+                            zero_return_provider=lambda pid: hs.state_for(pid).rolling_zero_return_pct())
+        position  = PositionEngine(bus, clock, all_pairs)
+        sequencer = AsianExecutionSequencer(bus, clock, all_pairs, config.notional_per_leg)
+        us_exch   = SimulatedUSExchange(bus, clock, config.cost_model, config.us_slippage)
+        foreign   = SimulatedForeignExchange(bus, clock, config.cost_model, config.foreign_slippage)
+        roce      = RoceRuceCalculator(bus, clock, all_pairs)
 
-        async for event in self._merge_streams(
-            self.us_loader.stream(start, end),
-            self.foreign_loader.stream(start, end),
-            self.fx_loader.stream(start, end),
-        ):
+        # Approved-signal router: risk emits RiskDecisions; sequencer needs the original signal.
+        # A pending_signals dict caches signals by event_id; on_decision forwards approved ones.
+        pending_signals: dict = {}
+        def cache_signal(sig): pending_signals[sig.event_id] = sig
+        async def on_decision(dec):
+            sig = pending_signals.pop(dec.signal_id, None)
+            if sig and dec.status == RiskDecisionStatus.APPROVED:
+                await sequencer.on_signal(sig)
+
+        # Wiring (exchanges subscribed first so last_price is populated before engine runs)
+        await bus.subscribe(Topic.MARKET_DATA, us_exch.on_bar)
+        await bus.subscribe(Topic.MARKET_DATA, foreign.on_bar)
+        await bus.subscribe(Topic.MARKET_DATA, hs.on_daily_bar)
+        await bus.subscribe(Topic.MARKET_DATA, sequencer.on_bar)
+        await bus.subscribe(Topic.MARKET_DATA, position.on_bar)
+        await bus.subscribe(Topic.FX_RATES, hs.on_fx_rate)
+        await bus.subscribe(Topic.FX_RATES, sequencer.on_fx_rate)
+        await bus.subscribe(Topic.FX_RATES, position.on_fx_rate)
+        await bus.subscribe(Topic.FX_RATES, foreign.on_fx_rate)
+        await bus.subscribe(Topic.SIGNALS, risk.on_signal)
+        await bus.subscribe(Topic.SIGNALS, roce.on_signal)
+        await bus.subscribe(Topic.SIGNALS, cache_signal)
+        await bus.subscribe(Topic.RISK_DECISIONS, on_decision)
+        await bus.subscribe(Topic.ORDERS, us_exch.on_order)
+        await bus.subscribe(Topic.ORDERS, foreign.on_order)
+        await bus.subscribe(Topic.FILLS, sequencer.on_fill)
+        await bus.subscribe(Topic.FILLS, position.on_fill)
+        await bus.subscribe(Topic.FILLS, roce.on_fill)
+        await bus.subscribe(Topic.POSITIONS, risk.on_position_update)
+        await bus.subscribe(Topic.PAIR_REGISTRY, hs.on_registry_update)
+
+        # Replay loop — synchronous iteration (MemoryBus.flush is synchronous too)
+        for event in self._merge(start, end):
             clock.advance_to(event.timestamp_exchange)
             if clock.date_changed:
-                new_registry = self.pair_registry_loader.load_as_of(clock.date)
-                await bus.publish("pair-registry", PairRegistryUpdateEvent(registry=new_registry))
-            topic = self._route_event_topic(event)
-            await bus.publish(topic, event)
-            await bus.flush()
+                new_active = [p for p in all_pairs if p.is_active_as_of(clock.today())]
+                await bus.publish(Topic.PAIR_REGISTRY, PairRegistryUpdateEvent(...))
+            await bus.publish(Topic.FX_RATES if isinstance(event, FXRateEvent) else Topic.MARKET_DATA, event)
+            await bus.flush()   # drains full cascade before advancing the clock
+
+        return roce.results
+
+    async def run_and_report(self, start: date, end: date, out_dir: str) -> list:
+        """Run and write tearsheet / JSON artefacts to out_dir."""
+        ...
 ```
+
+> **Key invariant**: The replay loop uses synchronous `for` (not `async for`) because
+> `MemoryBus.flush()` is synchronous and the merged stream is a plain `heapq.merge` iterator.
+> `flush()` after each event ensures the full signal → risk → order → fill → position cascade
+> completes before the clock advances.
 
 **Cost Model**
 
@@ -1133,6 +1320,7 @@ asian-adr-strategy/
 │       │   ├── connector.py
 │       │   ├── normalizer.py
 │       │   ├── staleness_monitor.py
+│       │   ├── subscription_manager.py # Dynamic subscribe/unsubscribe based on pair registry
 │       │   └── connectors/
 │       │       ├── polygon.py          # U.S. ADR live feed
 │       │       ├── alpaca_data.py      # U.S. ADR alternative
@@ -1209,12 +1397,14 @@ asian-adr-strategy/
 │       │   ├── logger.py
 │       │   ├── metrics.py
 │       │   ├── tracing.py
-│       │   └── alerting.py
+│       │   ├── alerting.py
+│       │   └── health.py
 │       │
 │       └── runners/
 │           ├── live_runner.py
 │           ├── backtest_runner.py
-│           └── data_recorder.py
+│           ├── data_recorder.py
+│           └── config.py               # RunnerConfig: TOML loader + RiskConfig/BacktestConfig builders
 │
 ├── tests/
 │   ├── unit/
@@ -1317,6 +1507,63 @@ asian-adr-strategy/
 ## 7. Internal APIs and Data Contracts
 
 All events inherit from `BaseEvent` and are immutable frozen Pydantic models.
+
+### 7.0 Core Types
+
+**Clock Protocol** (`core/clock.py`)
+
+```python
+class Clock(Protocol):
+    def now(self) -> datetime: ...    # timezone-aware UTC datetime
+    def today(self) -> date: ...      # UTC calendar date
+
+class LiveClock:
+    """Wall-clock UTC; used in live / paper trading."""
+
+class SimulatedClock:
+    """Driven by the backtest replay loop via advance_to()."""
+    def advance_to(self, timestamp: datetime | date) -> None: ...
+    @property
+    def date_changed(self) -> bool: ...   # True if the last advance crossed a date boundary
+    @property
+    def current_date(self) -> date: ...
+```
+
+`SimulatedClock` raises `ValueError` if the replay stream moves backwards (out-of-order
+guard). `date_changed` is the trigger for point-in-time registry reloads.
+
+**`HSPosition` Enum** (`core/types.py`)
+
+```python
+class HSPosition(str, Enum):
+    FLAT = "flat"   # no open position for this pair
+    OPEN = "open"   # pair has an established short ADR / long local position
+```
+
+**Literal Constants** (`core/types.py`)
+
+```python
+Side  = Literal["buy", "sell"]
+Venue = Literal["us_equity", "foreign_equity"]
+
+BUY:            Side  = "buy"
+SELL:           Side  = "sell"
+US_EQUITY:      Venue = "us_equity"
+FOREIGN_EQUITY: Venue = "foreign_equity"
+```
+
+**`STANDARD_ADR_RATIOS`** (`core/instruments.py`)
+
+```python
+STANDARD_ADR_RATIOS: tuple[Decimal, ...] = (
+    Decimal("0.01"), Decimal("0.1"),  Decimal("0.2"),  Decimal("0.25"),
+    Decimal("0.5"),  Decimal("1"),    Decimal("2"),    Decimal("2.5"),
+    Decimal("5"),    Decimal("10"),   Decimal("20"),   Decimal("50"),   Decimal("100"),
+)
+```
+
+**`AsianADRPairSpec` alias** — `AsianADRPairSpec = AsianADRApprovedPair` (same type, two names
+used in different parts of the spec).
 
 ### 7.1 Base Event
 
@@ -1479,22 +1726,35 @@ class AsianADRApprovedPair(BaseModel):
     underlying_ticker:    str
     underlying_exchange:  str           # "TSE", "HKEX", "KRX", "ASX", etc.
     underlying_currency:  str           # "JPY", "HKD", "KRW", "AUD", etc.
-    adr_ratio:            Decimal       # Local shares per 1 ADR; fixed structural constant
+    adr_ratio:            Decimal       # local shares per 1 ADR; structural β, never OLS-estimated
+
     estimation_days:      int = 60      # T: rolling window for µ/σ
     holding_days:         int = 90      # H: max holding period before force-close
     k0:                   Decimal = Decimal("2.0")
     kc:                   Decimal = Decimal("0.0")
-    zero_return_pct_adr:  Decimal       # liquidity metric (Bekaert et al. 2007)
-    roll_spread_local:    Decimal       # Roll (1984) effective spread, local leg
-    roll_spread_adr:      Decimal       # Roll (1984) effective spread, ADR leg
+
+    zero_return_pct_adr:  Decimal = Decimal("0")   # Bekaert et al. (2007) illiquidity metric
+    roll_spread_local:    Decimal = Decimal("0")   # Roll (1984) effective spread, local leg
+    roll_spread_adr:      Decimal = Decimal("0")   # Roll (1984) effective spread, ADR leg
+
     fx_hedge_required:    bool = False
     withholding_tax_rate: Decimal = Decimal("0.0")
     approved_date:        date
     expiry_date:          date
     is_active:            bool = True
+
+    # Validators: adr_ratio > 0; estimation_days and holding_days > 0;
+    #             expiry_date >= approved_date (enforced by model_post_init)
+
+    def is_active_as_of(self, as_of: date) -> bool:
+        """True if the pair is active and as_of falls within its validity window."""
+        return self.is_active and self.approved_date <= as_of <= self.expiry_date
 ```
 
 ### 7.10 ROCE / RUCE Result
+
+`RoceRuceResult` is a frozen `BaseModel` (not a `BaseEvent`) — it is produced by the
+`RoceRuceCalculator` and accumulated in `results`, not published on the bus.
 
 ```python
 class LiquidityBucket(str, Enum):
@@ -1514,12 +1774,64 @@ class RoceRuceResult(BaseModel):
     adr_return:       Decimal
     roce:             Decimal
     ruce:             Decimal
-    roll_cost_pct:    Decimal     # estimated round-trip cost (Roll 1984)
-    roce_net:         Decimal     # roce − roll_cost_pct
-    ruce_net:         Decimal     # ruce − roll_cost_pct
+    roll_cost_pct:    Decimal         # estimated round-trip cost (Roll 1984)
+    roce_net:         Decimal         # roce − roll_cost_pct
+    ruce_net:         Decimal         # ruce − roll_cost_pct
     liquidity_bucket: LiquidityBucket
-    was_force_closed: bool
-    was_aborted:      bool        # True if local leg never established (overnight reversal)
+    was_force_closed: bool = False
+    was_aborted:      bool = False    # True if local leg never established (overnight reversal)
+```
+
+### 7.11 Alert Events
+
+**`AdrOvernightAbortEvent`** (`strategy/hong_susmel/sequencer_state.py`)
+
+Published to `Topic.ALERTS` when the ADR short filled but the spread reversed overnight
+and the naked short is covered with no local leg ever placed.
+
+```python
+class AdrOvernightAbortEvent(BaseEvent):
+    event_type: Literal["adr_overnight_abort"] = "adr_overnight_abort"
+    pair_id:    str
+    reason:     str = "overnight_spread_reversal"
+```
+
+**`LegImbalanceEvent`** (`position/engine.py`)
+
+Published to `Topic.ALERTS` when one leg is open while the other is flat. Transient during
+normal overnight sequencing; a persistent imbalance indicates a failed leg.
+
+```python
+class LegImbalanceEvent(BaseEvent):
+    event_type: Literal["leg_imbalance"] = "leg_imbalance"
+    pair_id:    str
+    detail:     str    # "naked_adr_short" | "naked_local_long"
+```
+
+### 7.12 Exception Hierarchy
+
+All platform errors inherit from `AsianADRError`, allowing a single `except AsianADRError`
+at a runner boundary while letting genuine programming errors propagate:
+
+```
+AsianADRError
+├── ConfigurationError           — missing/malformed/inconsistent setting
+├── DataError
+│   ├── StaleDataError           — price/FX older than freshness window
+│   ├── MissingBarError          — no bar for a ticker on an expected date
+│   └── MissingFXRateError       — no cached FX rate for a required currency
+├── PairRegistryError
+│   ├── PairNotFoundError        — pair_id not in active registry
+│   └── ADRRatioUnresolvedError  — ratio is NULL/non-positive; pair rejected
+├── RiskError
+│   ├── RiskRuleViolation        — pre-trade rule blocked an order
+│   └── KillSwitchTriggered      — global kill switch fired
+├── ExecutionError
+│   ├── SequencerStateError      — invalid event for current sequencer phase
+│   └── OvernightAbort           — local leg abandoned after overnight reversal
+└── GatewayError
+    ├── ShortLocateUnavailable   — no borrow available for ADR short
+    └── OrderRejected            — broker rejected an order request
 ```
 
 ---
@@ -1550,18 +1862,21 @@ async def main():
     us_gateway      = InteractiveBrokersGateway(bus, clock, tws_port=config.ib_tws_port)
     roce_ruce       = RoceRuceCalculator(bus, clock, pair_registry)
 
-    await bus.subscribe("market-data",    hs_engine.on_daily_bar)
-    await bus.subscribe("fx-rates",       hs_engine.on_fx_rate)
-    await bus.subscribe("signals",        risk_engine.on_signal)
-    await bus.subscribe("risk-decisions", sequencer.on_signal)
-    await bus.subscribe("fills",          sequencer.on_fill)
-    await bus.subscribe("market-data",    sequencer.on_bar)
-    await bus.subscribe("fills",          position_engine.on_fill)
-    await bus.subscribe("market-data",    position_engine.on_bar)
-    await bus.subscribe("fx-rates",       position_engine.on_fx_rate)
-    await bus.subscribe("positions",      risk_engine.on_position_update)
-    await bus.subscribe("pair-registry",  hs_engine.on_registry_update)
-    await bus.subscribe("fills",          roce_ruce.on_fill)
+    await bus.subscribe(Topic.MARKET_DATA,    hs_engine.on_daily_bar)
+    await bus.subscribe(Topic.FX_RATES,       hs_engine.on_fx_rate)
+    await bus.subscribe(Topic.SIGNALS,        risk_engine.on_signal)
+    await bus.subscribe(Topic.SIGNALS,        roce_ruce.on_signal)     # force-close tracking
+    # In live mode, risk-decisions → sequencer routing is handled by the runner:
+    # only APPROVED decisions forward their originating signal to the sequencer.
+    await bus.subscribe(Topic.FILLS,          sequencer.on_fill)
+    await bus.subscribe(Topic.MARKET_DATA,    sequencer.on_bar)
+    await bus.subscribe(Topic.FX_RATES,       sequencer.on_fx_rate)
+    await bus.subscribe(Topic.FILLS,          position_engine.on_fill)
+    await bus.subscribe(Topic.MARKET_DATA,    position_engine.on_bar)
+    await bus.subscribe(Topic.FX_RATES,       position_engine.on_fx_rate)
+    await bus.subscribe(Topic.POSITIONS,      risk_engine.on_position_update)
+    await bus.subscribe(Topic.PAIR_REGISTRY,  hs_engine.on_registry_update)
+    await bus.subscribe(Topic.FILLS,          roce_ruce.on_fill)
 
     sequencer.register_gateway("us_equity", us_gateway)
 
@@ -2114,7 +2429,7 @@ disallow_untyped_defs = true
 warn_return_any = true
 ```
 
-Domain primitives: `PairId = NewType("PairId", str)`, `ADRRatio = NewType("ADRRatio", Decimal)`, `ZScore = NewType("ZScore", Decimal)`.
+Domain primitives: `PairId = NewType("PairId", str)`, `Ticker = NewType("Ticker", str)`, `CurrencyCode = NewType("CurrencyCode", str)`, `ExchangeCode = NewType("ExchangeCode", str)`, `ADRRatio = NewType("ADRRatio", Decimal)`, `OrderId = NewType("OrderId", str)`, `FillId = NewType("FillId", str)`.
 
 ### 14.2 Linting and Formatting
 

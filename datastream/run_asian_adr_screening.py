@@ -550,13 +550,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--adr-prices", type=Path,
-                   default=Path("data/parquet/adr/adr_prices.parquet"))
+                   default=Path("datastream/data/parquet/adr/adr_prices.parquet"))
     p.add_argument("--adr-reference", type=Path,
-                   default=Path("data/parquet/adr/adr_reference.parquet"))
+                   default=Path("datastream/data/parquet/adr/adr_reference.parquet"))
     p.add_argument("--global-prices", type=Path,
-                   default=Path("data/parquet/global/global_prices.parquet"))
+                   default=Path("datastream/data/parquet/global/global_prices.parquet"))
     p.add_argument("--fx-rates", type=Path,
-                   default=Path("data/parquet/fx/fx_rates.parquet"))
+                   default=Path("datastream/data/parquet/fx/fx_rates.parquet"))
     p.add_argument("--out", type=Path,
                    default=Path("config/pairs/asian_adr_pairs.json"))
     p.add_argument("--diagnostics-out", type=Path,

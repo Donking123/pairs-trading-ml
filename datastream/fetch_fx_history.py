@@ -48,6 +48,9 @@ import argparse
 import logging
 import os
 import sys
+
+from dotenv import load_dotenv
+load_dotenv()
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -63,10 +66,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("fetch_fx")
 
-start_date = date(2026, 4, 30) - timedelta(days=365 * 10)
+start_date = date(2026, 4, 30) - timedelta(days=365 * 15)
 end_date = date(2026, 4, 30)
 
-WRDS_USERNAME = os.environ["WRDS_USERNAME"]
+WRDS_USERNAME = os.environ.get("WRDS_USERNAME")
 WRDS_PASSWORD = os.environ.get("WRDS_PASSWORD")
 
 # Pre-euro legacy currencies superseded by EUR in 1999-2002, plus the old
