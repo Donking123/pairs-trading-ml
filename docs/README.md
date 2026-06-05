@@ -67,7 +67,7 @@ python fetch_datastream_global_data.py
 python fetch_fx_history.py
 
 # 2. Run pair selection
-python run_asian_adr_screening.py --as-of 2024-12-31
+python run_asian_adr_screening.py
 
 # 3. Run backtest
 python run_backtest.py
