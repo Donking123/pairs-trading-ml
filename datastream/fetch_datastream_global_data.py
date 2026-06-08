@@ -41,8 +41,6 @@ import logging
 import os
 import sys
 
-from dotenv import load_dotenv
-load_dotenv()
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -117,7 +115,10 @@ def require_wrds() -> "wrds.Connection":  # type: ignore[name-defined]
         raise SystemExit(2) from e
 
     log.info("connecting to WRDS as user=%s", WRDS_USERNAME)
-    return wrds.Connection(wrds_username=WRDS_USERNAME, wrds_password=WRDS_PASSWORD)
+    kwargs: dict = {"wrds_username": WRDS_USERNAME}
+    if WRDS_PASSWORD is not None:
+        kwargs["wrds_password"] = WRDS_PASSWORD
+    return wrds.Connection(**kwargs)
 
 
 def fetch_from_wrds(

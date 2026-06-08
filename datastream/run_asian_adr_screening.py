@@ -480,7 +480,11 @@ def run_pipeline(
         log.info("point-in-time filter (as_of=%s): %d -> %d pairs (dropped %d inactive)",
                  as_of, n_before, len(asian), n_before - len(asian))
     else:
-        log.debug("no startdate/enddate columns in reference — survivorship bias not corrected")
+        log.warning(
+            "adr_reference has no startdate/enddate columns — "
+            "survivorship bias NOT corrected. Run fetch_pit_adr_reference.py "
+            "and pass adr_reference_pit.parquet via --adr-reference to fix this."
+        )
 
     # Pre-filter 1: drop rows whose tickers have no price history at all.
     known_adrs = set(adr_prices["ticker"].unique())

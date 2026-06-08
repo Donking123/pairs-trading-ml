@@ -1,0 +1,46 @@
+[
+  {
+    "fold": 0,
+    "train_start": "2015-01-01",
+    "train_end": "2021-12-31",
+    "test_end": "2023-01-30",
+    "n_pairs_selected": 169,
+    "n_trades": 820,
+    "n_closed": 469,
+    "median_ruce_net": 0.046182,
+    "median_roce_net": 0.023718
+  },
+  {
+    "fold": 1,
+    "train_start": "2015-01-01",
+    "train_end": "2023-01-30",
+    "test_end": "2024-02-29",
+    "n_pairs_selected": 180,
+    "n_trades": 844,
+    "n_closed": 531,
+    "median_ruce_net": 0.048105,
+    "median_roce_net": 0.021836
+  },
+  {
+    "fold": 2,
+    "train_start": "2015-01-01",
+    "train_end": "2024-02-29",
+    "test_end": "2025-03-31",
+    "n_pairs_selected": 198,
+    "n_trades": 1062,
+    "n_closed": 614,
+    "median_ruce_net": 0.077676,
+    "median_roce_net": 0.037806
+  },
+  {
+    "fold": 3,
+    "train_start": "2015-01-01",
+    "train_end": "2025-03-31",
+    "test_end": "2026-04-30",
+    "n_pairs_selected": 202,
+    "n_trades": 1146,
+    "n_closed": 623,
+    "median_ruce_net": 0.061044,
+    "median_roce_net": 0.032316
+  }
+]

@@ -41,8 +41,6 @@ import logging
 import os
 import sys
 
-from dotenv import load_dotenv
-load_dotenv()
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -93,9 +91,13 @@ ADR_REFERENCE_SQL = """
         a.dscode       AS adr_ticker,
         a.isin         AS adr_isin,
         a.infocode     AS adr_infocode,
+        a.startdate    AS adr_startdate,
+        a.enddate      AS adr_enddate,
         u.dscode       AS underlying_ticker,
         u.primexchmnem AS underlying_exchange,
         u.isocurrcode  AS underlying_currency,
+        u.startdate    AS underlying_startdate,
+        u.enddate      AS underlying_enddate,
         NULL::float    AS adr_ratio
     FROM tr_ds_equities.wrds_ds_names AS a
     JOIN tr_ds_equities.wrds_ds_names AS u
@@ -121,7 +123,10 @@ def require_wrds() -> "wrds.Connection":  # type: ignore[name-defined]
         raise SystemExit(2) from e
 
     log.info("connecting to WRDS as user=%s", WRDS_USERNAME)
-    return wrds.Connection(wrds_username=WRDS_USERNAME, wrds_password=WRDS_PASSWORD)
+    kwargs: dict = {"wrds_username": WRDS_USERNAME}
+    if WRDS_PASSWORD is not None:
+        kwargs["wrds_password"] = WRDS_PASSWORD
+    return wrds.Connection(**kwargs)
 
 
 def discover_tables() -> None:
@@ -150,9 +155,78 @@ def fetch_from_wrds(start: date, end: date) -> tuple[pd.DataFrame, pd.DataFrame]
             date_cols=["marketdate"],
         )
         log.info("running ADR reference query")
-        reference = db.raw_sql(ADR_REFERENCE_SQL)
+        reference = db.raw_sql(
+            ADR_REFERENCE_SQL,
+            date_cols=["adr_startdate", "adr_enddate",
+                       "underlying_startdate", "underlying_enddate"],
+        )
     finally:
         db.close()
+
+    # wrds_ds_names stores one row per name-period (a new row is added each time
+    # a stock changes its name or ticker). The cross-join above therefore produces
+    # N_adr_periods × N_underlying_periods rows per economic pair, many with
+    # invalid or overlapping date windows. Collapse to one row per unique pair by
+    # taking the union of all name-period windows for each leg independently, then
+    # computing the intersection at the pair level.
+    #
+    # WRDS uses 2079-06-05 as a sentinel for "still active" instead of NULL.
+    # Convert sentinel to NaT before aggregating so MAX() treats open-ended
+    # records correctly (a real far-future date would dominate MAX wrongly).
+    sentinel = pd.Timestamp("2079-06-05")
+    for col in ["adr_startdate", "adr_enddate", "underlying_startdate", "underlying_enddate"]:
+        reference[col] = pd.to_datetime(reference[col])
+        reference.loc[reference[col] == sentinel, col] = pd.NaT
+
+    # Per-leg union: earliest start and latest end across all name periods.
+    # NaT enddate = still active; keeping skipna=True means MAX ignores NaT only
+    # when at least one concrete end exists — but if ANY period is open-ended we
+    # want NaT (still active) to win. Use a custom agg: NaT if any NaT, else max.
+    def _max_end(s):
+        return pd.NaT if s.isna().any() else s.max()
+
+    key_cols = ["adr_ticker", "adr_isin", "adr_infocode",
+                "underlying_ticker", "underlying_exchange", "underlying_currency"]
+    reference = (
+        reference
+        .groupby(key_cols, dropna=False)
+        .agg(
+            adr_startdate       =("adr_startdate",        "min"),
+            adr_enddate         =("adr_enddate",           _max_end),
+            underlying_startdate=("underlying_startdate",  "min"),
+            underlying_enddate  =("underlying_enddate",    _max_end),
+            adr_ratio           =("adr_ratio",             "first"),
+        )
+        .reset_index()
+    )
+
+    # Pair-level active window: intersection of both legs.
+    # startdate = later of the two starts (skipna=False: unknown start → NaT,
+    #   meaning the pair's start is genuinely unknown; exclude it from PIT screens).
+    # enddate   = earlier of the two ends (skipna=True: NaT means still active,
+    #   so take the other leg's actual end; both open-ended → NaT = still active).
+    reference["startdate"] = reference[
+        ["adr_startdate", "underlying_startdate"]
+    ].max(axis=1, skipna=False)
+    reference["enddate"] = reference[
+        ["adr_enddate", "underlying_enddate"]
+    ].min(axis=1)
+    reference = reference.drop(
+        columns=["adr_startdate", "adr_enddate",
+                 "underlying_startdate", "underlying_enddate"]
+    )
+
+    # Drop pairs where the computed window is invalid (start after end) — these
+    # are artefacts of non-overlapping name periods between the two legs.
+    valid = (
+        reference["startdate"].isna() |
+        reference["enddate"].isna() |
+        (reference["startdate"] <= reference["enddate"])
+    )
+    n_invalid = (~valid).sum()
+    if n_invalid:
+        log.warning("dropped %d pairs with startdate > enddate (name-period artefacts)", n_invalid)
+    reference = reference[valid].reset_index(drop=True)
 
     if prices.empty:
         log.error("WRDS returned zero ADR price rows for the requested range. "

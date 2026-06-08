@@ -49,8 +49,6 @@ import logging
 import os
 import sys
 
-from dotenv import load_dotenv
-load_dotenv()
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -169,26 +167,18 @@ def fetch_from_datastream(
         log.warning("Datastream returned zero FX rows for requested currencies")
         return _empty_fx_frame()
 
-    out_rows: list[dict] = []
-    seen_currencies: set[str] = set()
-    for _, row in raw.iterrows():
-        iso = str(row["iso_currency"])
-        rate = float(row["rate"])
-        if rate <= 0:
-            continue
-        # All fromcurrcode→USD SPOT rates are CCY per 1 USD — invert for output.
-        mid_usd_per_base = 1.0 / rate
-        out_rows.append({
-            "date":           pd.Timestamp(row["marketdate"]).date(),
-            "base_currency":  iso,
-            "quote_currency": "USD",
-            "currency_pair":  f"{iso}_USD",
-            "mid":            round(mid_usd_per_base, 10),
-            "provider":       "datastream",
-        })
-        seen_currencies.add(iso)
-
-    df = pd.DataFrame(out_rows)
+    # All fromcurrcode→USD SPOT rates are CCY per 1 USD — invert for output.
+    # SQL already filters rate > 0 but guard defensively before dividing.
+    raw = raw[raw["rate"] > 0].copy()
+    raw["mid"] = (1.0 / raw["rate"]).round(10)
+    raw["date"] = pd.to_datetime(raw["marketdate"]).dt.date
+    raw["base_currency"] = raw["iso_currency"].astype(str)
+    raw["quote_currency"] = "USD"
+    raw["currency_pair"] = raw["base_currency"] + "_USD"
+    raw["provider"] = "datastream"
+    df = raw[["date", "base_currency", "quote_currency",
+              "currency_pair", "mid", "provider"]].reset_index(drop=True)
+    seen_currencies: set[str] = set(df["base_currency"].unique())
 
     # Synthesise the USD identity series over the union of dates already present.
     if "USD" in currencies and not df.empty:
@@ -242,7 +232,7 @@ def load_currencies_from_reference(path: Path) -> list[str]:
             raise SystemExit(2)
     ccys = sorted(
         c for c in set(ref["underlying_currency"].astype(str).tolist())
-        if c != "None" and c not in EXCLUDED_CURRENCIES
+        if c not in ("None", "<NA>") and c not in EXCLUDED_CURRENCIES
     )
     if "USD" not in ccys:
         ccys.append("USD")
