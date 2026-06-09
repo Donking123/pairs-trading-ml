@@ -4,7 +4,7 @@ config.py  —  All parameters in one place. Edit this before running anything e
 from pathlib import Path
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-BASE_DIR  = Path("/Users/deepakgarrepalli/dev/MQF/MQF/Term 3/Quantitative Trading Strategies")
+BASE_DIR  = Path("/Users/deepakgarrepalli/Desktop/dev/MQF/MQF/Term 3/Quantitative Trading Strategies")
 DATA_RAW  = BASE_DIR / "data" / "raw"
 DATA_PROC = BASE_DIR / "data" / "processed"
 DATA_RES  = BASE_DIR / "data" / "results"
@@ -39,8 +39,8 @@ FACTOR_NAMES = list(FF5_FACTORS.values())
 
 # ── Rolling window ─────────────────────────────────────────────────────────────
 FORMATION_DAYS  = 756   # 3 years: paper-faithful formation window
-TRADING_DAYS    = 21    # 1 month: monthly trading cadence (paper-faithful)
-ROLL_STEP_DAYS  = 21    # roll forward 1 month each iteration
+TRADING_DAYS    = 63    # 3 months: enough for pairs with half-life up to ~30d to revert
+ROLL_STEP_DAYS  = 21    # roll forward 1 month each iteration (3 overlapping cohorts)
 MIN_OBS_FRAC    = 0.60  # require ≥60% non-NaN days in formation window
 
 # ── Regression ────────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ HALFLIFE_MAX_DAYS = 60
 
 # ── Trading signal ─────────────────────────────────────────────────────────────
 ENTRY_ZSCORE    = 2.0
-EXIT_ZSCORE     = 0.0    # exit when spread crosses mean — matches 7.3-day half-life
+EXIT_ZSCORE     = 0.0    # exit when spread crosses mean
 
 # FIX: widened stop-loss from 4.0 → 5.0.
 # 95.8% of trades were hitting stop-loss at ±4σ — the spread was routinely

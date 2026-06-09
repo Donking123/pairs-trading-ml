@@ -41,11 +41,11 @@ from config import (
 
 PAIRS_DIR = DATA_PROC / "pairs"
 
-MAX_PAIRS          = 50     # was 20 — more diversification lowers portfolio vol
-ENTRY_ZSCORE       = 2.0    # 2.5 killed trade count; 2.0 keeps enough opportunities
-ROLLING_WINDOW     = 15     # was 126 — must be < trading window (21d) to be meaningful
-HALFLIFE_CAP       = 18     # pairs with hl > 18d rarely complete reversion in 21d window
-COOLDOWN_DAYS      = 3      # was 5 — 5d cooldown in a 21d window was too restrictive
+MAX_PAIRS      = 50   # was 20 — more diversification lowers portfolio vol
+ENTRY_ZSCORE   = 2.0  # 2.5 killed trade count; 2.0 keeps enough opportunities
+ROLLING_WINDOW = 15   # rolling mean window for z-score (feeds into spread tracking)
+HALFLIFE_CAP   = 30   # with 63d window, pairs reverting within 30d cover ~2 half-lives
+COOLDOWN_DAYS  = 3    # was 5 — 5d cooldown in a 21d window was too restrictive
 
 
 # ── Normalised price series ───────────────────────────────────────────────────
@@ -87,10 +87,11 @@ def simulate_pair(
 
     spread = price_t_a - hedge * price_t_b
 
-    # Z-score: short rolling mean tracks level shifts in the trading period;
-    # formation std (756-day estimate) scales the signal. This keeps trade
-    # frequency low (fewer false entries) and portfolio vol contained — the
-    # main driver of the Sharpe improvement over the baseline.
+    # Z-score: rolling mean tracks recent spread level; formation std scales signal.
+    # fillna(spread_mean) seeds the first 4 days with the formation mean so pairs
+    # that ended the formation period diverged still trigger entries — after day 4
+    # the rolling mean adapts, preventing the strategy from chasing a stale 3-year
+    # average when the spread has legitimately shifted.
     roll_mean = spread.rolling(window=ROLLING_WINDOW, min_periods=5).mean().fillna(spread_mean)
     zscore    = (spread - roll_mean) / spread_std
     zscore    = zscore.replace([np.inf, -np.inf], np.nan)

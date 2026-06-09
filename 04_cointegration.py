@@ -4,7 +4,7 @@
 For each formation window:
   1. Loads within-cluster stock pairs (from 03_clustering.py)
   2. Tests each pair for cointegration (Engle-Granger ADF on price residuals)
-  3. Estimates the hedge ratio β via Ridge regression (consistent with 02)
+  3. Estimates the hedge ratio β via OLS (single predictor — Ridge is wrong here)
   4. Computes spread mean and std for z-score normalisation in backtesting
 
 Output: data/processed/pairs/pairs_YYYYMMDD_YYYYMMDD.parquet
@@ -18,7 +18,7 @@ Runtime: ~10-20 min for S&P 500 (serial execution for Mac reliability).
 
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import RidgeCV
+from sklearn.linear_model import LinearRegression
 from statsmodels.tsa.stattools import coint
 from pathlib import Path
 from itertools import combinations
@@ -36,8 +36,6 @@ from config import (
 CLUSTER_DIR = DATA_PROC / "clusters"
 PAIRS_DIR   = DATA_PROC / "pairs"
 PAIRS_DIR.mkdir(parents=True, exist_ok=True)
-
-RIDGE_ALPHAS = [0.01, 0.1, 1.0, 10.0, 100.0]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -96,7 +94,6 @@ def test_pair(
     # before converging) or too fast (<5 days, microstructure noise).
     try:
         # Quick OLS spread for half-life check (use coint's implicit OLS hedge)
-        from sklearn.linear_model import LinearRegression
         _ols = LinearRegression(fit_intercept=True)
         _ols.fit(pb.reshape(-1, 1), pa)
         _spread_hl = pa - float(_ols.coef_[0]) * pb
@@ -113,14 +110,15 @@ def test_pair(
     except Exception:
         return None
     # Regress price_a on price_b: price_a = intercept + β * price_b
-    # Ridge instantiated here (inside function) — avoids joblib pickling issues on Mac
+    # OLS is correct here — Ridge shrinks a single-predictor β toward 0, leaving
+    # residual directional exposure in the spread. Ridge is only appropriate for
+    # multi-predictor problems (e.g., factor beta estimation in step 2).
     try:
-        # Extra guard: cumprod can produce inf/nan if any return = -1.0 (stock → 0)
         if not (np.isfinite(pa).all() and np.isfinite(pb).all()):
             return None
-        ridge = RidgeCV(alphas=RIDGE_ALPHAS, fit_intercept=True)
-        ridge.fit(pb.reshape(-1, 1), pa)
-        hedge_ratio = float(ridge.coef_[0])
+        ols = LinearRegression(fit_intercept=True)
+        ols.fit(pb.reshape(-1, 1), pa)
+        hedge_ratio = float(ols.coef_[0])
     except Exception:
         return None
 
