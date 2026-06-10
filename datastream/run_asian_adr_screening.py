@@ -125,6 +125,18 @@ def _snap_raw_ratio(raw: float) -> Optional[float]:
     return _STANDARD_RATIOS[idx]
 
 
+def _adj_prices(df: pd.DataFrame, price_col: str = "close") -> pd.Series:
+    """Return price-return-adjusted prices: adj = raw / cumadjfactor.
+    In WRDS Datastream cumadjfactor > 1 for dates prior to splits and
+    bonus issues. Falls back to raw prices when adj_factor is absent or invalid."""
+    p = df[price_col].copy().astype(float)
+    if "adj_factor" in df.columns:
+        f = pd.to_numeric(df["adj_factor"], errors="coerce")
+        f = f.where(f > 0, other=1.0).fillna(1.0)
+        p = p / f
+    return p
+
+
 def _bulk_estimate_ratios(
     candidates: pd.DataFrame,
     adr_prices: pd.DataFrame,
@@ -140,14 +152,26 @@ def _bulk_estimate_ratios(
     tables for every candidate; the median itself is still computed per pair
     because the joint date overlap differs from pair to pair.
     """
-    # pivot ADR closes: index=date, columns=ticker
-    adr_wide = (adr_prices[adr_prices["ticker"].isin(candidates["adr_ticker"])]
-                .pivot_table(index="marketdate", columns="ticker", values="close", aggfunc="last"))
+    # apply cumadjfactor before pivoting so ratio estimates are based on
+    # split-adjusted prices (consistent with what the spread formula will use)
+    _adr = adr_prices[adr_prices["ticker"].isin(candidates["adr_ticker"])].copy()
+    if "adj_factor" in _adr.columns:
+        _f = pd.to_numeric(_adr["adj_factor"], errors="coerce").where(lambda x: x > 0, other=1.0).fillna(1.0)
+        _adr = _adr.copy()
+        _adr["close"] = _adr["close"].astype(float) / _f.values
+
+    # pivot ADR adjusted closes: index=date, columns=ticker
+    adr_wide = _adr.pivot_table(index="marketdate", columns="ticker", values="close", aggfunc="last")
     adr_wide.index = pd.to_datetime(adr_wide.index)
 
-    # pivot local closes: index=date, columns=ticker
-    loc_wide = (global_prices[global_prices["ticker"].isin(candidates["underlying_ticker"])]
-                .pivot_table(index="marketdate", columns="ticker", values="close", aggfunc="last"))
+    _loc = global_prices[global_prices["ticker"].isin(candidates["underlying_ticker"])].copy()
+    if "adj_factor" in _loc.columns:
+        _f = pd.to_numeric(_loc["adj_factor"], errors="coerce").where(lambda x: x > 0, other=1.0).fillna(1.0)
+        _loc = _loc.copy()
+        _loc["close"] = _loc["close"].astype(float) / _f.values
+
+    # pivot local adjusted closes: index=date, columns=ticker
+    loc_wide = _loc.pivot_table(index="marketdate", columns="ticker", values="close", aggfunc="last")
     loc_wide.index = pd.to_datetime(loc_wide.index)
 
     # pivot FX: index=date, columns=currency
@@ -195,8 +219,10 @@ def _estimate_ratio_from_prices(
     standard ratio in log-space.  Returns None if the overlap is too thin (<30
     joint observations) or the raw median is outside [0.001, 1000].
     """
-    adr = adr_prices.rename(columns={"close": "adr_close"}).set_index("marketdate")[["adr_close"]]
-    loc = local_prices.rename(columns={"close": "local_close"}).set_index("marketdate")[["local_close"]]
+    adr_df = adr_prices.set_index("marketdate")
+    loc_df = local_prices.set_index("marketdate")
+    adr = _adj_prices(adr_df, "close").rename("adr_close").to_frame()
+    loc = _adj_prices(loc_df, "close").rename("local_close").to_frame()
     fx  = fx_rates[fx_rates["base_currency"] == currency].copy()
     fx["date"] = pd.to_datetime(fx["date"])
     fx = fx.rename(columns={"date": "marketdate", "mid": "fx_mid"}).set_index("marketdate")[["fx_mid"]]
@@ -232,8 +258,10 @@ def reconstruct_spread(
 
     Drops any date where any of the three series is missing.
     """
-    adr = adr_prices.rename(columns={"close": "adr_close"}).set_index("marketdate")[["adr_close"]]
-    loc = local_prices.rename(columns={"close": "local_close"}).set_index("marketdate")[["local_close"]]
+    adr_df = adr_prices.set_index("marketdate")
+    loc_df = local_prices.set_index("marketdate")
+    adr = _adj_prices(adr_df, "close").rename("adr_close").to_frame()
+    loc = _adj_prices(loc_df, "close").rename("local_close").to_frame()
     fx  = fx_rates[fx_rates["base_currency"] == currency].copy()
     fx["date"] = pd.to_datetime(fx["date"])
     fx = fx.rename(columns={"date": "marketdate", "mid": "fx_mid"}).set_index("marketdate")[["fx_mid"]]
@@ -332,9 +360,16 @@ def screen_pair(
     pair_id = f"{adr_t}__{und_t}"
     diag = {"pair_id": pair_id, "status": "rejected", "reason": ""}
 
+    # include adj_factor in per-pair slices so downstream functions can apply
+    # price-return adjustment (cumadjfactor) to remove corporate-action noise
+    _adr_cols = ["marketdate", "close"] + (
+        ["adj_factor"] if "adj_factor" in adr_prices.columns else [])
+    _und_cols = ["marketdate", "close"] + (
+        ["adj_factor"] if "adj_factor" in global_prices.columns else [])
+
     if raw_ratio is None or pd.isna(raw_ratio):
-        adr_s = adr_prices[adr_prices["ticker"] == adr_t][["marketdate", "close"]]
-        und_s = global_prices[global_prices["ticker"] == und_t][["marketdate", "close"]]
+        adr_s = adr_prices[adr_prices["ticker"] == adr_t][_adr_cols]
+        und_s = global_prices[global_prices["ticker"] == und_t][_und_cols]
         estimated = _estimate_ratio_from_prices(adr_s, und_s, fx_rates, ccy)
         if estimated is None:
             diag["reason"] = "adr_ratio is null and could not be estimated from prices"
@@ -352,8 +387,8 @@ def screen_pair(
         diag["reason"] = f"invalid adr_ratio={ratio}"
         return None, diag
 
-    adr_slice = adr_prices[adr_prices["ticker"] == adr_t][["marketdate", "close"]]
-    und_slice = global_prices[global_prices["ticker"] == und_t][["marketdate", "close"]]
+    adr_slice = adr_prices[adr_prices["ticker"] == adr_t][_adr_cols]
+    und_slice = global_prices[global_prices["ticker"] == und_t][_und_cols]
     if adr_slice.empty or und_slice.empty:
         diag["reason"] = (f"missing prices: adr={len(adr_slice)}, "
                           f"underlying={len(und_slice)}")

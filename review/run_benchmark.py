@@ -91,6 +91,76 @@ def bootstrap_median(values: np.ndarray, n_boot: int, rng: np.random.Generator) 
 
 
 # -----------------------------------------------------------------------------
+# Block bootstrap (temporal-dependence-aware CI)
+# -----------------------------------------------------------------------------
+def block_bootstrap_median(
+    values: np.ndarray,
+    close_dates: np.ndarray,
+    block_size: int,
+    n_boot: int,
+    rng: np.random.Generator,
+) -> dict:
+    """Moving-block bootstrap that resamples contiguous time-ordered blocks.
+    Preserves serial clustering of trades; gives an honest CI when profitable
+    trades bunch in time rather than spread uniformly across the sample."""
+    if len(values) == 0:
+        return {"median": None, "ci_low": None, "ci_high": None,
+                "p_value_gt_0": None, "block_size": block_size}
+    order = np.argsort(close_dates)
+    vals = values[order]
+    n = len(vals)
+    max_start = max(1, n - block_size + 1)
+    n_blocks = int(np.ceil(n / block_size))
+    boot = np.empty(n_boot)
+    for b in range(n_boot):
+        starts = rng.integers(0, max_start, n_blocks)
+        idx = np.concatenate([np.arange(s, min(s + block_size, n)) for s in starts])[:n]
+        boot[b] = np.median(vals[idx])
+    return {
+        "median": round(float(np.median(values)), 6),
+        "ci_low": round(float(np.quantile(boot, 0.025)), 6),
+        "ci_high": round(float(np.quantile(boot, 0.975)), 6),
+        "p_value_gt_0": round(float((boot <= 0).mean()), 4),
+        "block_size": block_size,
+    }
+
+
+# -----------------------------------------------------------------------------
+# Pair-level jackknife (concentration risk)
+# -----------------------------------------------------------------------------
+def pair_jackknife(closed: pd.DataFrame, metric: str) -> dict:
+    """Leave-one-pair-out jackknife: measures how much each pair drives the
+    edge. A large negative % change when a pair is dropped signals that the
+    result depends on one idiosyncratic bet rather than a systematic effect."""
+    if "pair_id" not in closed.columns:
+        return {"error": "no pair_id column in trades"}
+    vals_all = closed[metric].to_numpy(dtype=float)
+    full_median = float(np.median(vals_all)) if len(vals_all) else float("nan")
+    pairs = sorted(closed["pair_id"].unique())
+    records = []
+    for pid in pairs:
+        sub = closed.loc[closed["pair_id"] != pid, metric].to_numpy(dtype=float)
+        loo = float(np.median(sub)) if len(sub) else float("nan")
+        change = loo - full_median
+        records.append({
+            "pair_id": pid,
+            "n_trades": int((closed["pair_id"] == pid).sum()),
+            "loo_median": round(loo, 6),
+            "change_abs": round(change, 6),
+            "pct_change": round(change / abs(full_median) * 100, 2) if full_median != 0 else None,
+        })
+    records.sort(key=lambda r: r["change_abs"])
+    worst = records[0] if records else {}
+    return {
+        "full_median": round(full_median, 6),
+        "n_pairs": len(pairs),
+        "most_influential_pair": worst.get("pair_id"),
+        "max_degradation_pct": worst.get("pct_change"),
+        "pairs": records,
+    }
+
+
+# -----------------------------------------------------------------------------
 # Random-entry null
 # -----------------------------------------------------------------------------
 def random_entry_trades(
@@ -177,7 +247,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--trades", type=Path, required=True,
                    help="strategy trades_oos.csv / trades.csv / trades.parquet")
     p.add_argument("--pairs", type=Path,
-                   default=_DATASTREAM / "config/pairs/asian_adr_pairs.json")
+                   default=_REPO_ROOT / "config/pairs/asian_adr_pairs.json")
     p.add_argument("--adr-prices", type=Path,
                    default=_DATASTREAM / "data/parquet/adr/adr_prices.parquet")
     p.add_argument("--global-prices", type=Path,
@@ -190,6 +260,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--n-sims", type=int, default=1000, help="random-entry simulations")
     p.add_argument("--n-boot", type=int, default=10000, help="bootstrap resamples")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--block-size", type=int, default=0,
+                   help="block bootstrap block size (0 = auto: n_trades^(1/3))")
+    p.add_argument("--skip-jackknife", action="store_true",
+                   help="skip pair jackknife (omits concentration check)")
+    p.add_argument("--skip-random-entry", action="store_true",
+                   help="skip random-entry null (no price data load needed)")
     p.add_argument("--out-dir", type=Path, default=None)
     return p.parse_args(argv)
 
@@ -203,66 +279,99 @@ def main(argv: Optional[list[str]] = None) -> int:
         trades = pd.read_parquet(args.trades)
     else:
         trades = pd.read_csv(args.trades)
-    closed = trades[~trades.get("was_aborted", False).astype(bool)]
+    # keep closed df aligned (same rows as strat_vals) for block bootstrap / jackknife
+    closed = trades[~trades.get("was_aborted", False).astype(bool)].copy()
+    metric_valid = closed[args.metric].astype(float).notna()
+    closed = closed[metric_valid].copy()
     strat_vals = closed[args.metric].to_numpy(dtype=float)
-    strat_vals = strat_vals[~np.isnan(strat_vals)]
     strat_median = float(np.median(strat_vals)) if len(strat_vals) else float("nan")
     log.info("strategy: %d closed trades, median %s = %.4f",
              len(strat_vals), args.metric, strat_median)
 
-    # --- bootstrap CI on the strategy ----------------------------------------
+    # --- iid bootstrap CI on the strategy ------------------------------------
     boot = bootstrap_median(strat_vals, args.n_boot, rng)
-    log.info("bootstrap median %s: %.4f  95%% CI [%.4f, %.4f]  p(median<=0)=%s",
+    log.info("iid bootstrap %s: %.4f  95%% CI [%.4f, %.4f]  p(median<=0)=%s",
              args.metric, boot["median"], boot["ci_low"], boot["ci_high"],
              boot["p_value_gt_0"])
 
-    # --- random-entry null ----------------------------------------------------
-    pairs = _bt.load_pairs(args.pairs)
-    for p in pairs:
-        p.holding_days = args.holding_days
-    panel = _bt.load_panel(args.adr_prices, args.global_prices, args.fx_rates, pairs)
-    # match the strategy's trade frequency per pair
-    entries_per_pair = (
-        closed.groupby("pair_id").size().to_dict() if "pair_id" in closed else {}
-    )
-    log.info("running %d random-entry simulations matched to strategy frequency",
-             args.n_sims)
-    null = random_entry_null(pairs, panel, entries_per_pair,
-                             args.holding_days, args.n_sims, rng)
-
-    if len(null):
-        # empirical one-sided p-value: P(null median >= strategy median)
-        p_emp = float((null >= strat_median).mean())
-        null_summary = {
-            "n_valid_sims": int(len(null)),
-            "null_median_mean": round(float(np.mean(null)), 6),
-            "null_median_p95": round(float(np.quantile(null, 0.95)), 6),
-            "strategy_median": round(strat_median, 6),
-            "empirical_p_value": round(p_emp, 4),
-        }
+    # --- block bootstrap (accounts for temporal clustering of trades) --------
+    if "close_date" in closed.columns:
+        bsize = (args.block_size if args.block_size > 0
+                 else max(1, int(round(len(strat_vals) ** (1 / 3)))))
+        close_dates = pd.to_datetime(closed["close_date"]).astype(np.int64).to_numpy()
+        block_boot = block_bootstrap_median(strat_vals, close_dates, bsize, args.n_boot, rng)
+        log.info("block bootstrap (size=%d): 95%% CI [%.4f, %.4f]  p(median<=0)=%s",
+                 bsize, block_boot["ci_low"], block_boot["ci_high"], block_boot["p_value_gt_0"])
     else:
-        null_summary = {"n_valid_sims": 0}
+        block_boot = None
+        log.warning("no close_date column; block bootstrap skipped")
+
+    # --- pair jackknife -------------------------------------------------------
+    if not args.skip_jackknife:
+        jk = pair_jackknife(closed, args.metric)
+        log.info("pair jackknife: %d pairs, most influential=%s (%.1f%% change on removal)",
+                 jk.get("n_pairs", 0), jk.get("most_influential_pair"),
+                 jk.get("max_degradation_pct") or 0.0)
+    else:
+        jk = None
+
+    # --- random-entry null ----------------------------------------------------
+    null_summary: dict = {}
+    if not args.skip_random_entry:
+        pairs = _bt.load_pairs(args.pairs)
+        for p in pairs:
+            p.holding_days = args.holding_days
+        panel = _bt.load_panel(args.adr_prices, args.global_prices, args.fx_rates, pairs)
+        entries_per_pair = (
+            closed.groupby("pair_id").size().to_dict() if "pair_id" in closed.columns else {}
+        )
+        log.info("running %d random-entry simulations matched to strategy frequency",
+                 args.n_sims)
+        null = random_entry_null(pairs, panel, entries_per_pair,
+                                 args.holding_days, args.n_sims, rng)
+        if len(null):
+            p_emp = float((null >= strat_median).mean())
+            null_summary = {
+                "n_valid_sims": int(len(null)),
+                "null_median_mean": round(float(np.mean(null)), 6),
+                "null_median_p95": round(float(np.quantile(null, 0.95)), 6),
+                "strategy_median": round(strat_median, 6),
+                "empirical_p_value": round(p_emp, 4),
+            }
+        else:
+            null_summary = {"n_valid_sims": 0}
 
     report = {
         "metric": args.metric,
         "n_strategy_trades": int(len(strat_vals)),
-        "bootstrap": boot,
+        "iid_bootstrap": boot,
+        "block_bootstrap": block_boot,
+        "pair_jackknife": jk,
         "random_entry_null": null_summary,
     }
 
     out_dir = args.out_dir or args.trades.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "significance.json").write_text(json.dumps(report, indent=2, default=str))
+    if jk and jk.get("pairs"):
+        pd.DataFrame(jk["pairs"]).to_csv(out_dir / "jackknife_pairs.csv", index=False)
 
     log.info("=" * 64)
     log.info("SIGNIFICANCE SUMMARY (%s)", args.metric)
     log.info("=" * 64)
-    log.info("  strategy median            %.4f", strat_median)
-    log.info("  bootstrap 95%% CI           [%.4f, %.4f]", boot["ci_low"], boot["ci_high"])
-    log.info("  bootstrap p(median<=0)     %s", boot["p_value_gt_0"])
+    log.info("  strategy median              %.4f", strat_median)
+    log.info("  iid bootstrap 95%% CI        [%.4f, %.4f]  p=%.4f",
+             boot["ci_low"], boot["ci_high"], boot["p_value_gt_0"])
+    if block_boot:
+        log.info("  block bootstrap 95%% CI      [%.4f, %.4f]  p=%.4f  (block=%d)",
+                 block_boot["ci_low"], block_boot["ci_high"],
+                 block_boot["p_value_gt_0"], block_boot["block_size"])
+    if jk:
+        log.info("  most influential pair        %s  (%.1f%% change when removed)",
+                 jk.get("most_influential_pair"), jk.get("max_degradation_pct") or 0.0)
     if null_summary.get("n_valid_sims"):
-        log.info("  random-entry null mean     %.4f", null_summary["null_median_mean"])
-        log.info("  empirical p-value          %s", null_summary["empirical_p_value"])
+        log.info("  random-entry null mean       %.4f", null_summary["null_median_mean"])
+        log.info("  empirical p-value            %s", null_summary["empirical_p_value"])
     log.info("=" * 64)
     log.info("wrote significance.json to %s", out_dir)
     return 0

@@ -165,6 +165,19 @@ def load_pairs(path: Path) -> list[Pair]:
     return pairs
 
 
+def _adj_prices(df: pd.DataFrame, price_col: str = "close") -> pd.Series:
+    """Return price-return-adjusted prices: adj = raw / cumadjfactor.
+    In WRDS Datastream cumadjfactor > 1 for dates prior to splits and
+    bonus issues, mapping historical prices to the current share-count
+    base. Falls back to raw prices when adj_factor is absent, zero, or NaN."""
+    p = df[price_col].copy().astype(float)
+    if "adj_factor" in df.columns:
+        f = pd.to_numeric(df["adj_factor"], errors="coerce")
+        f = f.where(f > 0, other=1.0).fillna(1.0)
+        p = p / f
+    return p
+
+
 def load_panel(
     adr_prices_path: Path,
     global_prices_path: Path,
@@ -173,8 +186,10 @@ def load_panel(
 ) -> dict[str, pd.DataFrame]:
     """
     Build, for each pair, a tidy DataFrame indexed by date with columns:
-        adr_close (USD), local_close (local ccy), fx_mid (USD per unit),
-        local_close_usd, spread
+        adr_close, local_close, fx_mid, local_close_usd, local_open_usd, spread
+    Prices are adjusted for splits and bonus issues via cumadjfactor.
+    local_open_usd is the adjusted local open price in USD (for realistic
+    Asia-open fills); falls back to close-based fill if open is unavailable.
     Inner-joined across the three sources so each row is fully valid.
     """
     def _read(path: Path) -> pd.DataFrame:
@@ -197,17 +212,9 @@ def load_panel(
 
     panel: dict[str, pd.DataFrame] = {}
     for pair in pairs:
-        adr_slice = (
-            adr[adr["ticker"] == pair.adr_ticker]
-            .set_index("marketdate")[["close"]]
-            .rename(columns={"close": "adr_close"})
-        )
-        loc_slice = (
-            glb[glb["ticker"] == pair.underlying_ticker]
-            .set_index("marketdate")[["close"]]
-            .rename(columns={"close": "local_close"})
-        )
-        if adr_slice.empty or loc_slice.empty:
+        adr_raw = adr[adr["ticker"] == pair.adr_ticker].set_index("marketdate")
+        loc_raw = glb[glb["ticker"] == pair.underlying_ticker].set_index("marketdate")
+        if adr_raw.empty or loc_raw.empty:
             log.warning("skipping %s: missing price series", pair.pair_id)
             continue
         if pair.underlying_currency not in fx_pivot.columns:
@@ -218,13 +225,28 @@ def load_panel(
             columns={pair.underlying_currency: "fx_mid"}
         )
 
-        df = adr_slice.join(loc_slice, how="inner").join(fx_series, how="inner").dropna()
+        # apply price-return adjustment (adj = raw / cumadjfactor) to remove
+        # split and bonus-issue discontinuities from the spread signal
+        adr_slice = _adj_prices(adr_raw, "close").rename("adr_close").to_frame()
+        loc_close_adj = _adj_prices(loc_raw, "close").rename("local_close")
+
+        df = (adr_slice
+              .join(loc_close_adj, how="inner")
+              .join(fx_series, how="inner")
+              .dropna())
         if df.empty:
             log.warning("skipping %s: no overlapping dates", pair.pair_id)
             continue
         df = df.sort_index()
         df["local_close_usd"] = df["local_close"] * df["fx_mid"]
         df["spread"] = df["adr_close"] - df["local_close_usd"] / pair.adr_ratio
+
+        # add adjusted local open price for realistic Asia-open fills (Issue 3)
+        if "open" in loc_raw.columns:
+            loc_open_adj = _adj_prices(loc_raw, "open").rename("local_open")
+            df = df.join(loc_open_adj, how="left")
+            df["local_open_usd"] = df["local_open"] * df["fx_mid"]
+
         panel[pair.pair_id] = df
 
     log.info("built panel for %d pairs (skipped %d)", len(panel), len(pairs) - len(panel))
@@ -267,6 +289,7 @@ def backtest_pair(
     cfg: dict,
     start: Optional[date] = None,
     end: Optional[date] = None,
+    max_overnight_gap_days: int = 4,
 ) -> list[Trade]:
     """
     Single-pair event loop with realistic execution modelling.
@@ -306,6 +329,9 @@ def backtest_pair(
     spreads  = df["spread"].to_numpy()
     adr_close = df["adr_close"].to_numpy()
     local_usd = df["local_close_usd"].to_numpy()
+    # open prices for Asia-open fills (Issue 3); None when parquet lacks open column
+    local_open_usd = (df["local_open_usd"].to_numpy()
+                      if "local_open_usd" in df.columns else None)
     fx_rates  = df["fx_mid"].to_numpy()
     dates = df.index.to_pydatetime() if hasattr(df.index, "to_pydatetime") else df.index
     if isinstance(dates, np.ndarray):
@@ -361,11 +387,30 @@ def backtest_pair(
                     i += 1
                     continue
 
+                # Issue 4: skip entries when the inner-join "next bar" is separated
+                # from day D by more than max_overnight_gap_days calendar days.
+                # Gaps this large (e.g. Asian holiday weeks) violate the overnight
+                # timing assumption and leave the ADR short unhedged for too long.
+                if (dates[j] - dates[i]).days > max_overnight_gap_days:
+                    log.debug(
+                        "skipping entry on %s [%s]: next joint bar is %d days later "
+                        "(holiday gap > %d)",
+                        dates[i], pair.pair_id,
+                        (dates[j] - dates[i]).days, max_overnight_gap_days,
+                    )
+                    state.position = HSPosition.FLAT
+                    i += 1
+                    continue
+
                 spread_d1 = spreads[j]
                 if spread_d1 > kappa_close:
-                    # BUY local at D+1 close. Local entry roll cost deducted upfront
-                    # (raises effective buy price by half_roll_local).
-                    loc_open_eff = float(local_usd[j]) * (1.0 + half_roll_local)
+                    # Issue 3: BUY local at D+1 OPEN (realistic Asia-open fill).
+                    # Fall back to close if open prices are unavailable or NaN.
+                    _loc_px = (local_open_usd[j]
+                               if local_open_usd is not None
+                               and not np.isnan(local_open_usd[j])
+                               else local_usd[j])
+                    loc_open_eff = float(_loc_px) * (1.0 + half_roll_local)
                     state.position             = HSPosition.OPEN
                     state.local_open_price_usd = loc_open_eff
                     state.local_open_date      = dates[j]
@@ -537,7 +582,7 @@ def build_report(trades: list[Trade], pairs: list[Pair], cfg: dict) -> dict:
 
     closed = df[~df["was_aborted"]]
     aborted_count = int(df["was_aborted"].sum())
-    force_close_count = int((df["close_reason"] == str(CloseReason.FORCE_CLOSE)).sum())
+    force_close_count = int((df["close_reason"] == CloseReason.FORCE_CLOSE.value).sum())
 
     summary = {
         "n_trades":         int(len(df)),
@@ -606,6 +651,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--H",  dest="H",  type=int, default=90, help="max holding period (days)")
     p.add_argument("--k0", type=float, default=2.0, help="entry multiplier")
     p.add_argument("--kc", type=float, default=0.0, help="exit multiplier")
+    p.add_argument("--max-overnight-gap", type=int, default=4,
+                   dest="max_overnight_gap",
+                   help="skip two-bar fills where next joint bar is more than this "
+                        "many calendar days after the ADR short day (holiday-gap filter)")
     return p.parse_args(argv)
 
 
@@ -623,7 +672,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         p.k0 = args.k0
         p.kc = args.kc
 
-    cfg = {"T": args.T, "H": args.H, "k0": args.k0, "kc": args.kc}
+    cfg = {"T": args.T, "H": args.H, "k0": args.k0, "kc": args.kc,
+           "max_overnight_gap": args.max_overnight_gap}
     log.info("backtest config: %s", cfg)
 
     panel = load_panel(args.adr_prices, args.global_prices, args.fx_rates, pairs)
@@ -636,7 +686,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         df = panel.get(pair.pair_id)
         if df is None:
             continue
-        trades = backtest_pair(pair, df, cfg)
+        trades = backtest_pair(pair, df, cfg,
+                               max_overnight_gap_days=args.max_overnight_gap)
         all_trades.extend(trades)
         log.info("[%s] %d trades, %d bars", pair.pair_id, len(trades), len(df))
 

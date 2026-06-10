@@ -43,6 +43,43 @@ logging.basicConfig(
 log = logging.getLogger("cost_sensitivity")
 
 
+# -----------------------------------------------------------------------------
+# Market-impact model (square-root impact, Almgren et al. 2005)
+# -----------------------------------------------------------------------------
+def market_impact_sweep(
+    closed: pd.DataFrame,
+    notional_usd: float,
+    adv_levels: list[float],
+    borrow_rates: list[float],
+    eta: float = 0.1,
+) -> list[dict]:
+    """Square-root market-impact model: cost per leg = eta * sqrt(notional/ADV).
+    Four applications per round-trip (entry + exit of both legs). Sweeps ADV
+    levels to find the break-even liquidity threshold."""
+    duration = closed["duration_days"].to_numpy(dtype=float)
+    roll_cost = (closed["roll_cost_pct"].to_numpy(dtype=float)
+                 if "roll_cost_pct" in closed.columns else np.zeros(len(closed)))
+    ruce_gross = closed["ruce"].to_numpy(dtype=float) + roll_cost
+    results = []
+    for adv in adv_levels:
+        impact_per_leg = eta * float(np.sqrt(notional_usd / adv))
+        total_impact = 4.0 * impact_per_leg
+        for borrow in borrow_rates:
+            borrow_cost = borrow * (duration / 365.0)
+            ruce_net = ruce_gross - roll_cost - borrow_cost - total_impact
+            median_net = float(np.median(ruce_net))
+            results.append({
+                "adv_usd": int(adv),
+                "borrow_rate_pct": round(borrow * 100, 2),
+                "impact_per_leg_pct": round(impact_per_leg * 100, 4),
+                "total_impact_pct": round(total_impact * 100, 4),
+                "median_ruce_net": round(median_net, 6),
+                "pct_profitable": round(float((ruce_net > 0).mean()), 4),
+                "breakeven": median_net <= 0,
+            })
+    return results
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Cost sensitivity sweep: borrow rate × slippage on OOS trades.",
@@ -54,6 +91,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="comma-separated annualised borrow rates to sweep")
     p.add_argument("--slippage-bps", type=str, default="0,5,10,20",
                    help="comma-separated one-way slippage in basis points per leg")
+    p.add_argument("--notional-usd", type=float, default=100_000,
+                   help="USD notional per ADR leg for market-impact model")
+    p.add_argument("--adv-levels-usd", type=str,
+                   default="500000,1000000,5000000,10000000",
+                   help="comma-separated assumed ADV in USD for market-impact sweep")
+    p.add_argument("--impact-eta", type=float, default=0.1,
+                   help="market-impact coefficient eta in sqrt(notional/ADV) model")
     p.add_argument("--out-dir", type=Path, default=None)
     return p.parse_args(argv)
 
@@ -128,6 +172,30 @@ def main(argv: Optional[list[str]] = None) -> int:
                  breakeven.iloc[0]["slippage_bps_per_leg"])
 
     log.info("wrote cost_sensitivity.csv + .json to %s", out_dir)
+
+    # --- market impact model --------------------------------------------------
+    adv_levels = [float(x) for x in args.adv_levels_usd.split(",")]
+    log.info("running market-impact sweep (eta=%.2f, notional=$%s) ...",
+             args.impact_eta, f"{int(args.notional_usd):,}")
+    impact_results = market_impact_sweep(
+        closed, args.notional_usd, adv_levels, borrow_rates, args.impact_eta
+    )
+    df_impact = pd.DataFrame(impact_results)
+    df_impact.to_csv(out_dir / "market_impact.csv", index=False)
+    (out_dir / "market_impact.json").write_text(json.dumps(impact_results, indent=2))
+    pivot_impact = df_impact.pivot_table(
+        index="adv_usd", columns="borrow_rate_pct", values="median_ruce_net"
+    )
+    log.info("\nMedian RUCE-net by ADV (USD) × borrow rate (%%):\n%s", pivot_impact.to_string())
+    breakeven_i = df_impact[df_impact["breakeven"]]
+    if breakeven_i.empty:
+        log.info("Strategy remains positive across the entire ADV/borrow impact grid.")
+    else:
+        first = breakeven_i.iloc[0]
+        log.info("Strategy breaks even at: ADV=$%s, borrow=%.1f%%, impact/leg=%.2f%%",
+                 f"{int(first['adv_usd']):,}", first["borrow_rate_pct"],
+                 first["impact_per_leg_pct"])
+    log.info("wrote market_impact.csv + .json to %s", out_dir)
     return 0
 
 

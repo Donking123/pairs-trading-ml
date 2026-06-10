@@ -74,7 +74,7 @@ def _load_module(name: str, path: Path):
 
 _screen = _load_module("ds_screening", _DATASTREAM / "run_asian_adr_screening.py")
 _bt = _load_module("ds_backtest", _DATASTREAM / "run_backtest.py")
-_wf = _load_module("research_walkforward", _REPO_ROOT / "research" / "run_walkforward.py")
+_wf = _load_module("research_walkforward", _DATASTREAM / "run_walkforward.py")
 
 
 # -----------------------------------------------------------------------------
@@ -257,10 +257,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--fx-rates", type=Path,
                    default=_DATASTREAM / "data/parquet/fx/fx_rates.parquet")
     p.add_argument("--pairs", type=Path,
-                   default=_DATASTREAM / "config/pairs/asian_adr_pairs.json",
+                   default=_REPO_ROOT / "config/pairs/asian_adr_pairs.json",
                    help="pre-selected registry (in-sample mode only)")
     p.add_argument("--out-dir", type=Path,
-                   default=_REPO_ROOT / "research" / "output"
+                   default=_REPO_ROOT / "review" / "output"
                    / f"grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 
     p.add_argument("--in-sample", action="store_true",

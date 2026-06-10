@@ -177,6 +177,22 @@ def performance_stats(ret: pd.Series) -> dict:
 
 
 # -----------------------------------------------------------------------------
+# Rolling Sharpe (sub-period consistency check)
+# -----------------------------------------------------------------------------
+def rolling_sharpe(ret: pd.Series, window: int = 252) -> pd.Series:
+    """Annualised Sharpe in a rolling calendar-day window.
+    Declining or inconsistent rolling Sharpe flags regime dependence."""
+    if ret.empty:
+        return pd.Series(dtype=float, name=f"rolling_sharpe_{window}d")
+    min_p = max(window // 4, 20)
+    mu = ret.rolling(window, min_periods=min_p).mean()
+    sd = ret.rolling(window, min_periods=min_p).std(ddof=1)
+    rs = (mu / sd * np.sqrt(TRADING_DAYS)).where(sd > 0)
+    rs.name = f"rolling_sharpe_{window}d"
+    return rs
+
+
+# -----------------------------------------------------------------------------
 # CLI
 # -----------------------------------------------------------------------------
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -192,6 +208,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--weight", default="equal", choices=["equal", "capital"])
     p.add_argument("--max-concurrent", type=int, default=20,
                    help="capital-budget cap (only used with --weight capital)")
+    p.add_argument("--rolling-window", type=int, default=252,
+                   help="calendar-day window for rolling Sharpe output")
     p.add_argument("--out-dir", type=Path, default=None,
                    help="directory for equity_curve.csv + portfolio_stats.json "
                         "(default: alongside --trades)")
@@ -216,6 +234,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         curve = pd.DataFrame({"date": ret.index, "daily_return": ret.values,
                               "equity": equity.values})
         curve.to_csv(out_dir / "equity_curve.csv", index=False)
+
+        rs = rolling_sharpe(ret, args.rolling_window)
+        if not rs.dropna().empty:
+            rs_df = pd.DataFrame({"date": rs.index, rs.name: rs.values})
+            rs_df.to_csv(out_dir / "rolling_sharpe.csv", index=False)
+            log.info("wrote rolling_sharpe.csv (%d-day window) to %s",
+                     args.rolling_window, out_dir)
 
     (out_dir / "portfolio_stats.json").write_text(json.dumps(stats, indent=2, default=str))
 

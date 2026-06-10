@@ -32,7 +32,7 @@ Usage
 -----
 ::
 
-    python research/run_walkforward.py \
+    python datastream/run_walkforward.py \
         --adr-prices    datastream/data/parquet/adr/adr_prices.parquet \
         --adr-reference datastream/data/parquet/adr/adr_reference.parquet \
         --global-prices datastream/data/parquet/global/global_prices.parquet \
@@ -45,7 +45,7 @@ Usage
 For an expanding walk-forward with 3 OOS folds between ``--split`` and
 ``--test-end``::
 
-    python research/run_walkforward.py ... --folds 3
+    python datastream/run_walkforward.py ... --folds 3
 """
 
 from __future__ import annotations
@@ -200,6 +200,7 @@ def run_fold(
             continue
         pair_trades = _bt.backtest_pair(
             pair, df, bt_cfg, start=test_start, end=test_end,
+            max_overnight_gap_days=cfg.get("max_overnight_gap", 4),
         )
         trades.extend(pair_trades)
 
@@ -213,7 +214,8 @@ def _build_panel(
     fx_rates: pd.DataFrame,
     pairs: list,
 ) -> dict[str, pd.DataFrame]:
-    """In-memory equivalent of run_backtest.load_panel (no disk re-read)."""
+    """In-memory equivalent of run_backtest.load_panel (no disk re-read).
+    Mirrors load_panel: applies cumadjfactor adjustment and includes local_open_usd."""
     fx_pivot = fx_rates.pivot_table(
         index="date", columns="base_currency", values="mid", aggfunc="last"
     )
@@ -221,29 +223,35 @@ def _build_panel(
 
     panel: dict[str, pd.DataFrame] = {}
     for pair in pairs:
-        adr_slice = (
-            adr_prices[adr_prices["ticker"] == pair.adr_ticker]
-            .set_index("marketdate")[["close"]]
-            .rename(columns={"close": "adr_close"})
-        )
-        loc_slice = (
-            global_prices[global_prices["ticker"] == pair.underlying_ticker]
-            .set_index("marketdate")[["close"]]
-            .rename(columns={"close": "local_close"})
-        )
-        if adr_slice.empty or loc_slice.empty:
+        adr_raw = adr_prices[adr_prices["ticker"] == pair.adr_ticker].set_index("marketdate")
+        loc_raw = global_prices[global_prices["ticker"] == pair.underlying_ticker].set_index("marketdate")
+        if adr_raw.empty or loc_raw.empty:
             continue
         if pair.underlying_currency not in fx_pivot.columns:
             continue
         fx_series = fx_pivot[[pair.underlying_currency]].rename(
             columns={pair.underlying_currency: "fx_mid"}
         )
-        df = adr_slice.join(loc_slice, how="inner").join(fx_series, how="inner").dropna()
+
+        # apply price-return adjustment (adj = raw / cumadjfactor)
+        adr_slice = _bt._adj_prices(adr_raw, "close").rename("adr_close").to_frame()
+        loc_close_adj = _bt._adj_prices(loc_raw, "close").rename("local_close")
+
+        df = (adr_slice
+              .join(loc_close_adj, how="inner")
+              .join(fx_series, how="inner")
+              .dropna())
         if df.empty:
             continue
         df = df.sort_index()
         df["local_close_usd"] = df["local_close"] * df["fx_mid"]
         df["spread"] = df["adr_close"] - df["local_close_usd"] / pair.adr_ratio
+
+        if "open" in loc_raw.columns:
+            loc_open_adj = _bt._adj_prices(loc_raw, "open").rename("local_open")
+            df = df.join(loc_open_adj, how="left")
+            df["local_open_usd"] = df["local_open"] * df["fx_mid"]
+
         panel[pair.pair_id] = df
     return panel
 
@@ -269,7 +277,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--fx-rates", type=Path,
                    default=_DATASTREAM / "data/parquet/fx/fx_rates.parquet")
     p.add_argument("--out-dir", type=Path,
-                   default=_REPO_ROOT / "research" / "output"
+                   default=_DATASTREAM / "data" / "walkforward_output"
                    / f"walkforward_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 
     p.add_argument("--train-start", type=_parse_date, required=True,
@@ -290,6 +298,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--min-history-days", type=int, default=504)
     p.add_argument("--min-non-zero-return-pct", type=float, default=0.50)
     p.add_argument("--max-zero-return-pct-adr", type=float, default=0.50)
+    p.add_argument("--max-overnight-gap", type=int, default=4,
+                   dest="max_overnight_gap",
+                   help="skip two-bar fills where next joint bar is more than this "
+                        "many calendar days after the ADR short day")
     return p.parse_args(argv)
 
 
@@ -313,6 +325,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "min_history_days": args.min_history_days,
         "min_non_zero_return_pct": args.min_non_zero_return_pct,
         "max_zero_return_pct_adr": args.max_zero_return_pct_adr,
+        "max_overnight_gap": args.max_overnight_gap,
     }
 
     folds = build_folds(args.train_start, args.split, args.test_end, args.folds)
