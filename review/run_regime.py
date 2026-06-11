@@ -30,17 +30,19 @@ Usage
 -----
 ::
 
-    python research/run_regime.py \\
-        --trades        research/output/walkforward_XXXX/trades_oos.csv \\
+    # No flags needed: auto-discovers the latest trades file and uses the
+    # default pairs registry + global prices parquet.
+    python review/run_regime.py
+
+    # Or point at a specific run / override any default:
+    python review/run_regime.py \\
+        --trades        datastream/data/walkforward_output/walkforward_XXXX/trades_oos.csv \\
         --global-prices datastream/data/parquet/global/global_prices.parquet \\
         --pairs         config/pairs/asian_adr_pairs.json \\
-        --out-dir       research/output/walkforward_XXXX
+        --out-dir       datastream/data/walkforward_output/walkforward_XXXX
 
     # Use VIX directly (CSV must have columns: date, vix):
-    python research/run_regime.py \\
-        --trades  research/output/walkforward_XXXX/trades_oos.csv \\
-        --vix-csv /path/to/vix.csv \\
-        --out-dir research/output/walkforward_XXXX
+    python review/run_regime.py --vix-csv /path/to/vix.csv
 """
 
 from __future__ import annotations
@@ -50,6 +52,7 @@ import importlib.util
 import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -66,6 +69,32 @@ TRADING_DAYS = 252
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DATASTREAM = _REPO_ROOT / "datastream"
+
+# Default locations searched when --trades / --pairs / --global-prices are omitted.
+_PAIRS_DEFAULT = _REPO_ROOT / "config/pairs/asian_adr_pairs.json"
+_GLOBAL_PRICES_DEFAULT = _DATASTREAM / "data/parquet/global/global_prices.parquet"
+# Output roots that may contain walkforward_* run folders with a trades file.
+_OUTPUT_ROOTS = [
+    _DATASTREAM / "data" / "walkforward_output",
+    _REPO_ROOT / "review" / "output",
+    _REPO_ROOT / "research" / "output",
+]
+# Trades filenames in order of preference.
+_TRADES_NAMES = ["trades_oos.csv", "trades.csv", "trades.parquet"]
+
+
+def _find_latest_trades() -> Optional[Path]:
+    """Auto-discover the most recently modified trades file under the known
+    output roots so ``--trades`` can be omitted. Returns None if none found."""
+    candidates: list[Path] = []
+    for root in _OUTPUT_ROOTS:
+        if not root.exists():
+            continue
+        for name in _TRADES_NAMES:
+            candidates.extend(root.rglob(name))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 def _load_module(name: str, path: Path):
@@ -158,24 +187,37 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         description="Regime-dependence test: split OOS trades by vol regime and year.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--trades", type=Path, required=True,
-                   help="trades_oos.csv / trades.csv / trades.parquet")
-    p.add_argument("--pairs", type=Path,
-                   default=_REPO_ROOT / "config/pairs/asian_adr_pairs.json")
-    p.add_argument("--global-prices", type=Path,
-                   default=_DATASTREAM / "data/parquet/global/global_prices.parquet")
+    p.add_argument("--trades", type=Path, default=None,
+                   help="trades_oos.csv / trades.csv / trades.parquet "
+                        "(auto-discovers latest under datastream/data/walkforward_output if omitted)")
+    p.add_argument("--pairs", type=Path, default=_PAIRS_DEFAULT)
+    p.add_argument("--global-prices", type=Path, default=_GLOBAL_PRICES_DEFAULT)
     p.add_argument("--vix-csv", type=Path, default=None,
                    help="optional CSV with columns 'date,vix'; overrides internal proxy")
     p.add_argument("--vol-window", type=int, default=20,
                    help="rolling window (days) for realised vol proxy")
     p.add_argument("--metric", default="ruce_net",
                    choices=["roce", "ruce", "roce_net", "ruce_net"])
-    p.add_argument("--out-dir", type=Path, default=None)
+    p.add_argument("--out-dir", type=Path,
+                   default=_REPO_ROOT / "review" / "output"
+                   / f"regime_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     return p.parse_args(argv)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
+
+    # --- resolve trades path (auto-discover latest if not supplied) -----------
+    if args.trades is None:
+        args.trades = _find_latest_trades()
+        if args.trades is None:
+            log.error("no trades file found under %s — pass --trades explicitly",
+                      ", ".join(str(r) for r in _OUTPUT_ROOTS))
+            return 2
+        log.info("auto-discovered trades file: %s", args.trades)
+    if not args.trades.exists():
+        log.error("trades file not found: %s", args.trades)
+        return 2
 
     # --- load trades ----------------------------------------------------------
     if args.trades.suffix == ".parquet":
@@ -257,7 +299,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "by_year": year_records,
     }
 
-    out_dir = args.out_dir or args.trades.parent
+    out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "regime_summary.json").write_text(json.dumps(summary, indent=2, default=str))
 

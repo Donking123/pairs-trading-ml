@@ -20,9 +20,13 @@ Usage
 -----
 ::
 
-    python research/run_cost_sensitivity.py \
-        --trades  research/output/walkforward/trades_oos.csv \
-        --out-dir research/output/walkforward
+    # No flags needed: auto-discovers the latest trades file.
+    python review/run_cost_sensitivity.py
+
+    # Or point at a specific run:
+    python review/run_cost_sensitivity.py \
+        --trades  datastream/data/walkforward_output/walkforward_XXXX/trades_oos.csv \
+        --out-dir datastream/data/walkforward_output/walkforward_XXXX
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +46,31 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(name)s :: %(message)s",
 )
 log = logging.getLogger("cost_sensitivity")
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DATASTREAM = _REPO_ROOT / "datastream"
+# Output roots that may contain walkforward_* run folders with a trades file.
+_OUTPUT_ROOTS = [
+    _DATASTREAM / "data" / "walkforward_output",
+    _REPO_ROOT / "review" / "output",
+    _REPO_ROOT / "research" / "output",
+]
+# Trades filenames in order of preference.
+_TRADES_NAMES = ["trades_oos.csv", "trades.csv", "trades.parquet"]
+
+
+def _find_latest_trades() -> Optional[Path]:
+    """Auto-discover the most recently modified trades file under the known
+    output roots so ``--trades`` can be omitted. Returns None if none found."""
+    candidates: list[Path] = []
+    for root in _OUTPUT_ROOTS:
+        if not root.exists():
+            continue
+        for name in _TRADES_NAMES:
+            candidates.extend(root.rglob(name))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 # -----------------------------------------------------------------------------
@@ -85,8 +115,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         description="Cost sensitivity sweep: borrow rate × slippage on OOS trades.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--trades", type=Path, required=True,
-                   help="trades_oos.csv from run_walkforward.py")
+    p.add_argument("--trades", type=Path, default=None,
+                   help="trades_oos.csv from run_walkforward.py "
+                        "(auto-discovers latest under datastream/data/walkforward_output if omitted)")
     p.add_argument("--borrow-rates", type=str, default="0.0,0.005,0.01,0.02",
                    help="comma-separated annualised borrow rates to sweep")
     p.add_argument("--slippage-bps", type=str, default="0,5,10,20",
@@ -98,12 +129,26 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="comma-separated assumed ADV in USD for market-impact sweep")
     p.add_argument("--impact-eta", type=float, default=0.1,
                    help="market-impact coefficient eta in sqrt(notional/ADV) model")
-    p.add_argument("--out-dir", type=Path, default=None)
+    p.add_argument("--out-dir", type=Path,
+                   default=_REPO_ROOT / "review" / "output"
+                   / f"cost_sensitivity_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     return p.parse_args(argv)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
+
+    # --- resolve trades path (auto-discover latest if not supplied) -----------
+    if args.trades is None:
+        args.trades = _find_latest_trades()
+        if args.trades is None:
+            log.error("no trades file found under %s — pass --trades explicitly",
+                      ", ".join(str(r) for r in _OUTPUT_ROOTS))
+            return 2
+        log.info("auto-discovered trades file: %s", args.trades)
+    if not args.trades.exists():
+        log.error("trades file not found: %s", args.trades)
+        return 2
 
     trades = pd.read_csv(args.trades)
     closed = trades[~trades["was_aborted"].astype(bool)].copy()
@@ -150,7 +195,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                      "BELOW ZERO" if median_net <= 0 else "positive")
 
     df_out = pd.DataFrame(results)
-    out_dir = args.out_dir or Path(args.trades).parent
+    out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     df_out.to_csv(out_dir / "cost_sensitivity.csv", index=False)
     (out_dir / "cost_sensitivity.json").write_text(json.dumps(results, indent=2))

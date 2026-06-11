@@ -1,0 +1,80 @@
+{
+  "metric": "ruce_net",
+  "vol_proxy": "realised_vol_20d",
+  "vol_window_days": 20,
+  "regime_monotone_increasing": false,
+  "regime_dependence_flagged": false,
+  "regimes": [
+    {
+      "regime": "low",
+      "vol_label": "realised_vol_20d",
+      "n_trades": 405,
+      "n_closed": 261,
+      "median": 0.058037,
+      "mean": 0.109978,
+      "std": 0.26484,
+      "pct_profitable": 0.8659,
+      "p25": 0.022248,
+      "p75": 0.10641
+    },
+    {
+      "regime": "medium",
+      "vol_label": "realised_vol_20d",
+      "n_trades": 582,
+      "n_closed": 359,
+      "median": 0.052267,
+      "mean": 0.071295,
+      "std": 0.154892,
+      "pct_profitable": 0.805,
+      "p25": 0.013931,
+      "p75": 0.101795
+    },
+    {
+      "regime": "high",
+      "vol_label": "realised_vol_20d",
+      "n_trades": 955,
+      "n_closed": 560,
+      "median": 0.04164,
+      "mean": 0.064854,
+      "std": 0.175694,
+      "pct_profitable": 0.7589,
+      "p25": 0.001961,
+      "p75": 0.080249
+    }
+  ],
+  "by_year": [
+    {
+      "year": 2022,
+      "n_trades": 648,
+      "n_closed": 373,
+      "median": 0.048366,
+      "mean": 0.068096,
+      "std": 0.179887,
+      "pct_profitable": 0.7694,
+      "p25": 0.00275,
+      "p75": 0.080068
+    },
+    {
+      "year": 2023,
+      "n_trades": 615,
+      "n_closed": 407,
+      "median": 0.041631,
+      "mean": 0.059672,
+      "std": 0.17451,
+      "pct_profitable": 0.7887,
+      "p25": 0.006995,
+      "p75": 0.079063
+    },
+    {
+      "year": 2024,
+      "n_trades": 679,
+      "n_closed": 400,
+      "median": 0.060812,
+      "mean": 0.102327,
+      "std": 0.221911,
+      "pct_profitable": 0.83,
+      "p25": 0.022487,
+      "p75": 0.125092
+    }
+  ]
+}

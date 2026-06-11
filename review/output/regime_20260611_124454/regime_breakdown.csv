@@ -1,0 +1,4 @@
+regime,vol_label,n_trades,n_closed,median,mean,std,pct_profitable,p25,p75
+low,realised_vol_20d,405,261,0.058037,0.109978,0.26484,0.8659,0.022248,0.10641
+medium,realised_vol_20d,582,359,0.052267,0.071295,0.154892,0.805,0.013931,0.101795
+high,realised_vol_20d,955,560,0.04164,0.064854,0.175694,0.7589,0.001961,0.080249

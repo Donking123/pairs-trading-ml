@@ -29,10 +29,14 @@ Usage
 -----
 ::
 
-    python research/portfolio.py \
-        --trades research/output/walkforward_XXXX/trades_oos.csv \
+    # No flags needed: auto-discovers the latest trades file.
+    python review/portfolio.py
+
+    # Or point at a specific run:
+    python review/portfolio.py \
+        --trades datastream/data/walkforward_output/walkforward_XXXX/trades_oos.csv \
         --metric ruce_net \
-        --out-dir research/output/walkforward_XXXX
+        --out-dir datastream/data/walkforward_output/walkforward_XXXX
 
 Accepts either the ``trades_oos.csv`` from the walk-forward driver or the
 ``trades.csv`` / ``trades.parquet`` from ``datastream/run_backtest.py``.
@@ -43,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -56,6 +61,31 @@ logging.basicConfig(
 log = logging.getLogger("portfolio")
 
 TRADING_DAYS = 252
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DATASTREAM = _REPO_ROOT / "datastream"
+# Output roots that may contain walkforward_* run folders with a trades file.
+_OUTPUT_ROOTS = [
+    _DATASTREAM / "data" / "walkforward_output",
+    _REPO_ROOT / "review" / "output",
+    _REPO_ROOT / "research" / "output",
+]
+# Trades filenames in order of preference.
+_TRADES_NAMES = ["trades_oos.csv", "trades.csv", "trades.parquet"]
+
+
+def find_latest_trades() -> Optional[Path]:
+    """Auto-discover the most recently modified trades file under the known
+    output roots so ``--trades`` can be omitted. Returns None if none found."""
+    candidates: list[Path] = []
+    for root in _OUTPUT_ROOTS:
+        if not root.exists():
+            continue
+        for name in _TRADES_NAMES:
+            candidates.extend(root.rglob(name))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 # -----------------------------------------------------------------------------
@@ -200,8 +230,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         description="Portfolio-level tearsheet (equity curve + Sharpe/maxDD) from per-trade output.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--trades", type=Path, required=True,
-                   help="trades_oos.csv / trades.csv / trades.parquet")
+    p.add_argument("--trades", type=Path, default=None,
+                   help="trades_oos.csv / trades.csv / trades.parquet "
+                        "(auto-discovers latest under datastream/data/walkforward_output if omitted)")
     p.add_argument("--metric", default="ruce_net",
                    choices=["roce", "ruce", "roce_net", "ruce_net"],
                    help="per-trade return column to compound")
@@ -210,14 +241,26 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="capital-budget cap (only used with --weight capital)")
     p.add_argument("--rolling-window", type=int, default=252,
                    help="calendar-day window for rolling Sharpe output")
-    p.add_argument("--out-dir", type=Path, default=None,
+    p.add_argument("--out-dir", type=Path,
+                   default=_REPO_ROOT / "review" / "output"
+                   / f"portfolio_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                    help="directory for equity_curve.csv + portfolio_stats.json "
-                        "(default: alongside --trades)")
+                        "(default: review/output/portfolio_<timestamp>)")
     return p.parse_args(argv)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
+
+    # --- resolve trades path (auto-discover latest if not supplied) -----------
+    if args.trades is None:
+        args.trades = find_latest_trades()
+        if args.trades is None:
+            log.error("no trades file found under %s — pass --trades explicitly",
+                      ", ".join(str(r) for r in _OUTPUT_ROOTS))
+            return 2
+        log.info("auto-discovered trades file: %s", args.trades)
+
     trades = load_trades(args.trades)
     log.info("loaded %d trades from %s", len(trades), args.trades)
 
@@ -226,7 +269,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     stats["metric"] = args.metric
     stats["weight"] = args.weight
 
-    out_dir = args.out_dir or args.trades.parent
+    out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not ret.empty:

@@ -1,0 +1,25 @@
+{
+  "metric": "ruce_net",
+  "market_regression": {
+    "regressor": "local_equity_proxy",
+    "n_obs": 778,
+    "alpha_daily": 0.00582067,
+    "alpha_annualised": 1.466808,
+    "beta": 0.056778,
+    "r_squared": 0.001385,
+    "t_stat_alpha": 11.226,
+    "t_stat_beta": 1.0376,
+    "correlation": 0.03722
+  },
+  "fx_regression": {
+    "regressor": "fx_proxy",
+    "n_obs": 778,
+    "alpha_daily": 0.00578836,
+    "alpha_annualised": 1.458666,
+    "beta": -0.229172,
+    "r_squared": 0.001661,
+    "t_stat_alpha": 11.1454,
+    "t_stat_beta": -1.1363,
+    "correlation": -0.040757
+  }
+}

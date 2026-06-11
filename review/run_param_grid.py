@@ -265,9 +265,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
     p.add_argument("--in-sample", action="store_true",
                    help="sweep over full history with fixed registry (optimistic)")
-    p.add_argument("--train-start", type=_parse_date, default=None)
-    p.add_argument("--split", type=_parse_date, default=None)
-    p.add_argument("--test-end", type=_parse_date, default=None)
+    p.add_argument("--train-start", type=_parse_date, default=_parse_date("2015-01-01"))
+    p.add_argument("--split", type=_parse_date, default=_parse_date("2021-12-31"))
+    p.add_argument("--test-end", type=_parse_date, default=_parse_date("2024-12-31"))
 
     p.add_argument("--k0-grid", dest="k0_grid", type=_floats, default=[1.65, 2.0, 2.33])
     p.add_argument("--kc-grid", dest="kc_grid", type=_floats, default=[0.0, 0.5, 1.0])

@@ -29,18 +29,21 @@ Usage
 -----
 ::
 
-    python research/run_market_neutral.py \\
-        --trades    research/output/walkforward_XXXX/trades_oos.csv \\
+    # No flags needed: auto-discovers the latest trades file and uses the
+    # default pairs registry + global prices + fx parquet.
+    python review/run_market_neutral.py
+
+    # Or point at a specific run / override any default:
+    python review/run_market_neutral.py \\
+        --trades    datastream/data/walkforward_output/walkforward_XXXX/trades_oos.csv \\
         --global-prices datastream/data/parquet/global/global_prices.parquet \\
         --fx-rates  datastream/data/parquet/fx/fx_rates.parquet \\
         --pairs     config/pairs/asian_adr_pairs.json \\
-        --out-dir   research/output/walkforward_XXXX
+        --out-dir   datastream/data/walkforward_output/walkforward_XXXX
 
     # Use an external benchmark instead of the internal proxy:
-    python research/run_market_neutral.py \\
-        --trades         research/output/walkforward_XXXX/trades_oos.csv \\
-        --market-returns /path/to/msci_em_daily.csv \\
-        --out-dir        research/output/walkforward_XXXX
+    python review/run_market_neutral.py \\
+        --market-returns /path/to/msci_em_daily.csv
 """
 
 from __future__ import annotations
@@ -50,6 +53,7 @@ import importlib.util
 import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -98,7 +102,7 @@ def build_local_equity_proxy(
               .set_index("marketdate")["close"]
               .sort_index())
         if len(px) > 5:
-            rets[ticker] = px.pct_change()
+            rets[ticker] = px.pct_change(fill_method=None)
     if not rets:
         return pd.Series(dtype=float, name="local_equity_proxy")
     df = pd.DataFrame(rets).dropna(how="all")
@@ -119,7 +123,7 @@ def build_fx_proxy(fx_rates: pd.DataFrame, pairs_data: list[dict]) -> pd.Series:
     rets: dict[str, pd.Series] = {}
     for ccy in ccys:
         if ccy in fx_wide.columns:
-            rets[ccy] = fx_wide[ccy].pct_change()
+            rets[ccy] = fx_wide[ccy].pct_change(fill_method=None)
     if not rets:
         return pd.Series(dtype=float, name="fx_proxy")
     df = pd.DataFrame(rets).dropna(how="all")
@@ -180,8 +184,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         description="Market-neutrality test: regress strategy daily returns vs equity/FX proxies.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--trades", type=Path, required=True,
-                   help="trades_oos.csv / trades.csv / trades.parquet")
+    p.add_argument("--trades", type=Path, default=None,
+                   help="trades_oos.csv / trades.csv / trades.parquet "
+                        "(auto-discovers latest under datastream/data/walkforward_output if omitted)")
     p.add_argument("--pairs", type=Path,
                    default=_REPO_ROOT / "config/pairs/asian_adr_pairs.json")
     p.add_argument("--global-prices", type=Path,
@@ -195,12 +200,23 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    choices=["roce", "ruce", "roce_net", "ruce_net"])
     p.add_argument("--max-concurrent", type=int, default=20,
                    help="capital slots for equal-weight daily-return construction")
-    p.add_argument("--out-dir", type=Path, default=None)
+    p.add_argument("--out-dir", type=Path,
+                   default=_REPO_ROOT / "review" / "output"
+                   / f"market_neutral_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     return p.parse_args(argv)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
+
+    # --- resolve trades path (auto-discover latest if not supplied) -----------
+    if args.trades is None:
+        args.trades = _port.find_latest_trades()
+        if args.trades is None:
+            log.error("no trades file found under the default walkforward output "
+                      "roots — pass --trades explicitly")
+            return 2
+        log.info("auto-discovered trades file: %s", args.trades)
 
     # --- build strategy daily returns -----------------------------------------
     trades = _port.load_trades(args.trades)
@@ -277,7 +293,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "fx_regression": result_fx if result_fx else None,
     }
 
-    out_dir = args.out_dir or args.trades.parent
+    out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "market_neutral.json").write_text(json.dumps(report, indent=2, default=str))
 

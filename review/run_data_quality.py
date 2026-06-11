@@ -44,6 +44,7 @@ import importlib.util
 import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -245,7 +246,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="flag pairs with stale runs longer than this many days")
     p.add_argument("--zsf-threshold", type=float, default=0.50,
                    help="flag pairs where zero-return spread fraction exceeds this")
-    p.add_argument("--out-dir", type=Path, default=None)
+    p.add_argument("--out-dir", type=Path,
+                   default=_REPO_ROOT / "review" / "output"
+                   / f"data_quality_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     return p.parse_args(argv)
 
 
@@ -310,7 +313,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                  (stale_exp.get("stale_open_pct") or 0) * 100,
                  (stale_exp.get("stale_close_pct") or 0) * 100)
 
-    out_dir = args.out_dir or (args.trades.parent if args.trades else args.pairs.parent)
+    out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_dir / "data_quality.csv", index=False)
     (out_dir / "data_quality_summary.json").write_text(

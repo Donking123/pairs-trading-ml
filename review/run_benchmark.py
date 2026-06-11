@@ -26,11 +26,16 @@ Usage
 -----
 ::
 
-    python research/run_benchmark.py \
-        --trades  research/output/walkforward_XXXX/trades_oos.csv \
-        --pairs   datastream/config/pairs/asian_adr_pairs.json \
+    # No flags needed: auto-discovers the latest trades file and uses the
+    # default pairs registry + price/fx parquets.
+    python review/run_benchmark.py
+
+    # Or point at a specific run / override any default:
+    python review/run_benchmark.py \
+        --trades  datastream/data/walkforward_output/walkforward_XXXX/trades_oos.csv \
+        --pairs   config/pairs/asian_adr_pairs.json \
         --n-sims  1000 \
-        --out-dir research/output/walkforward_XXXX
+        --out-dir datastream/data/walkforward_output/walkforward_XXXX
 """
 
 from __future__ import annotations
@@ -55,6 +60,29 @@ log = logging.getLogger("benchmark")
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DATASTREAM = _REPO_ROOT / "datastream"
+
+# Output roots that may contain walkforward_* run folders with a trades file.
+_OUTPUT_ROOTS = [
+    _DATASTREAM / "data" / "walkforward_output",
+    _REPO_ROOT / "review" / "output",
+    _REPO_ROOT / "research" / "output",
+]
+# Trades filenames in order of preference.
+_TRADES_NAMES = ["trades_oos.csv", "trades.csv", "trades.parquet"]
+
+
+def _find_latest_trades() -> Optional[Path]:
+    """Auto-discover the most recently modified trades file under the known
+    output roots so ``--trades`` can be omitted. Returns None if none found."""
+    candidates: list[Path] = []
+    for root in _OUTPUT_ROOTS:
+        if not root.exists():
+            continue
+        for name in _TRADES_NAMES:
+            candidates.extend(root.rglob(name))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 def _load_module(name: str, path: Path):
@@ -244,8 +272,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         description="Random-entry null + bootstrap significance test for the strategy.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--trades", type=Path, required=True,
-                   help="strategy trades_oos.csv / trades.csv / trades.parquet")
+    p.add_argument("--trades", type=Path, default=None,
+                   help="strategy trades_oos.csv / trades.csv / trades.parquet "
+                        "(auto-discovers latest under datastream/data/walkforward_output if omitted)")
     p.add_argument("--pairs", type=Path,
                    default=_REPO_ROOT / "config/pairs/asian_adr_pairs.json")
     p.add_argument("--adr-prices", type=Path,
@@ -266,13 +295,27 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="skip pair jackknife (omits concentration check)")
     p.add_argument("--skip-random-entry", action="store_true",
                    help="skip random-entry null (no price data load needed)")
-    p.add_argument("--out-dir", type=Path, default=None)
+    p.add_argument("--out-dir", type=Path,
+                   default=_REPO_ROOT / "review" / "output"
+                   / f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     return p.parse_args(argv)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
     rng = np.random.default_rng(args.seed)
+
+    # --- resolve trades path (auto-discover latest if not supplied) -----------
+    if args.trades is None:
+        args.trades = _find_latest_trades()
+        if args.trades is None:
+            log.error("no trades file found under %s — pass --trades explicitly",
+                      ", ".join(str(r) for r in _OUTPUT_ROOTS))
+            return 2
+        log.info("auto-discovered trades file: %s", args.trades)
+    if not args.trades.exists():
+        log.error("trades file not found: %s", args.trades)
+        return 2
 
     # --- load strategy trades -------------------------------------------------
     if args.trades.suffix == ".parquet":
@@ -350,7 +393,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "random_entry_null": null_summary,
     }
 
-    out_dir = args.out_dir or args.trades.parent
+    out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "significance.json").write_text(json.dumps(report, indent=2, default=str))
     if jk and jk.get("pairs"):
