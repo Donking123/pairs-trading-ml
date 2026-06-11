@@ -144,7 +144,7 @@ Phase 2 — queued for Phase 3 sensitivity:
 | Suspect | Why we suspect it | When to investigate |
 |---|---|---|
 | Equal-weight allocation | Dilutes strong (z=3.5) signals to same weight as marginal (z=2.1) | Phase 3: try \|entry-z\|-weighted |
-| Strict continuous-membership universe | approximately 407 stocks/month vs paper's approximately 500 | Phase 3: soften filter |
+| Strict continuous-membership universe | ~407 stocks/month vs paper's ~500 | Phase 3: soften filter |
 | t+1 close-to-close (vs open[t+1]) | Modest execution lag | Phase 4: low priority |
 
 ### Phase 2 NEW hyperparameters (will need tuning with same discipline)

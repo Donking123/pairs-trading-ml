@@ -1,31 +1,58 @@
 # Project Progress — QF621 Pairs Trading (ML Clustering)
 
-**Last updated:** 2026-05-25 · **Status:** **Phase 2 COMPLETE — paper replicated + published to GitHub.** PC core Sharpe 1.028 vs paper 1.01 ✅. Ready for Phase 2.5 (factor-beta extension).
+**Last updated:** 2026-06-07 (end of session) · **Status: PROJECT COMPLETE — all phases built, run, validated, written up.**
+
+## ▶ RESUME TOMORROW — read this first
+
+The whole project is done. Two **optional** loose ends remain, nothing half-finished:
+1. **Submission-format pass** on `phases/phase4/QF621_writeup.md` — needs the QF621 spec (page
+   limit, format, required sections). Writeup is a complete prose draft; all 16 numbers QA'd
+   against parquets.
+2. **GitHub sync** (optional, outward-facing) — copy Phase 2.5/3/4 `src/` + phase folders to the
+   git-wired repo (`~/Documents/repos/pairs-trading-ml`); run a secrets audit first; needs explicit OK.
+
+**Where everything is:**
+- **Conclusions / synthesis:** `CONCLUSIONS.md` (repo root) — the defensible bottom line.
+- **Writeup:** `phases/phase4/QF621_writeup.md` (final prose, §1–8).
+- **Teaching notebooks (executed, with plots):** `phase2_5_complete_reference.ipynb` (3 plots),
+  `phase3_complete_reference.ipynb` (3 plots), `phase4_complete_reference.ipynb` (4 plots).
+- **Data:** `data/` = legacy 2000–2023 (locked-result inputs, pristine); `data_through_2025/` =
+  CIZ/v2 pull 2000–2025 (forward test). 53 synthetic tests pass.
+
+**Final results:** PC 1.028 / factor 1.013 in-sample · robustness bands 0.485–1.046 / 0.615–1.060
+· net of costs 0.572 / 0.578 (→ ~0.78 with passive exec + no stop) · lookahead 6/6 PASS ·
+**out-of-sample 2024–25 (frozen): PC 0.858 generalises, factor 0.117 does not.** Edge is real but
+**regime-dependent**; honest deployable Sharpe ≈ 0.5–0.8. See `CONCLUSIONS.md`.
+
+> **Phase 4b lookahead test:** `src/lookahead.py` + `phase4/notebooks/01_lookahead_test.py`.
+> Runs backtest full vs truncated; overlapping daily per-pair positions must be identical.
+> Real smoke (PC 2003→04) = 0 mismatches PASS. Replaces Alpaca (4b).
+
+> **Phase 3 COMPLETE (key finding):** PC band 0.485–1.046, factor band 0.615–1.060. Both
+> robust to RLM hedge (1.046/1.060) & z-weight (1.012/1.027); clustering is load-bearing
+> (HDBSCAN dilutes both ~0.615; PC also breaks under hierarchical 0.485 but **factor-beta
+> holds 0.991** → factor-beta is the sturdier metric). Cause: HDBSCAN/hierarchical trade ~3×
+> more diluted pairs than OPTICS. README + writeup + notebook all filled.
+
+> **Phase 4a realism BUILT:** `src/costs.py` (bid/ask transaction costs from real CRSP
+> quotes + 35bps borrow + 3.5σ stop) + `run_backtest(realism=...)` knob (default frictionless
+> = bit-identical). `phase4/notebooks/02_run_realism.py` runs pc/factor with frictions vs
+> baselines. Suite 53/53. **User runs `01_lookahead_test.py` + `02_run_realism.py`** (after
+> Phase 3 grid frees the machine). 4c writeup still pending.
+
+> **Phase 3 deliverables:** `phases/phase3/{README,decisions}.md`, `01_run_robustness_grid.py`
+> (8 cells: {pc,factor}×{hdbscan,hierarchical,rlm,zweight}), `02_compare_robustness.py`,
+> `03_xi_alpha_sensitivity.py` (runnable now). Engine knobs: backtest `clusterer` /
+> `hedge_method` / `allocation` — all default to prior behavior.
+
+> **Phase 2.5 COMPLETE:** factor core 1.013 (≈ PC 1.028); factor+filter 0.858 (> PC+filter
+> 0.752). Deliverables in `phases/phase2_5/` (5 grid cells, executed notebook).
+
+**Prior (2026-05-24):** Phase 2 COMPLETE — paper replicated. PC core Sharpe 1.028 vs paper 1.01 ✅.
 
 > Session handoff — **read this first to resume.** The project is a from-scratch
 > replication of **Rotondi & Russo (2025)** clustering-based pairs trading, plus a
 > **factor-beta clustering** extension, for the QF621 group project.
-
-## 🌐 GitHub repo (published 2026-05-24)
-
-- **URL:** https://github.com/Donking123/pairs-trading-ml
-- **Visibility:** PUBLIC (was originally private, flipped to public same day after audit)
-- **Working folder:** `~/Documents/repos/pairs-trading-ml/` — this is the folder wired to
-  GitHub (origin/main); commit + push from here going forward.
-- **Old working folder:** `~/Documents/Pairs Trading - Machine Learning/pairs-trading-ml/`
-  still exists with the `data/` cache (140MB, gitignored). Don't commit from there.
-- **License:** MIT (© 2026 Don)
-- **Author email on commits:** `Donkingyappy1@users.noreply.github.com` (privacy-preserving)
-
-### Collaborators
-| User | Status | Permission |
-|---|---|---|
-| `Donking123` (Don) | Owner | admin |
-| `deepakgarrepalli1998` | ✅ Accepted | write |
-| `santapris` | ⏳ Invited 2026-05-24 14:04 UTC | write (pending) |
-| `nglei1999` | ⏳ Invited 2026-05-24 15:03 UTC | write (pending) |
-
-Re-check: `gh api "/repos/Donking123/pairs-trading-ml/collaborators" --jq '.[].login'`
 
 ---
 
@@ -71,6 +98,7 @@ Re-check: `gh api "/repos/Donking123/pairs-trading-ml/collaborators" --jq '.[].l
 
 | Doc | What it is |
 |---|---|
+| `notes/progress.md` (this file) | Full build plan — phases, checkpoints, pipeline guide |
 | `notes/strategy-reconciliation.md` | The 12 proposal-vs-paper decisions + paste-ready reworked Strategy A |
 | `notes/concepts-walkthrough.md` | Topic-organised reference: phase plan, conventions, rolling window, synthetic test walkthrough, glossary |
 | `notes/phase-0-data-spine.md` | Phase 0 reference note |

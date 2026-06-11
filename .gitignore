@@ -5,6 +5,7 @@
 data/*.parquet
 data/raw/
 data/cache/
+data_through_2025/
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Logs (can be regenerated; sometimes large)

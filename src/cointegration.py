@@ -24,13 +24,17 @@ Paper reference: Rotondi & Russo (2025), §3.3. Our convention (per
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.stattools import adfuller, coint
 
 from src.config import HALF_LIFE_BOUNDS, COINTEGRATION_P_THRESHOLD
+
+
+PvalueMethod = Literal["adf", "mackinnon"]
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -132,6 +136,7 @@ def engle_granger(
     prices_b: pd.Series,
     name_a: str = "A",
     name_b: str = "B",
+    pvalue_method: PvalueMethod = "adf",
 ) -> CointegrationResult:
     """Two-step Engle-Granger test of cointegration between A and B.
 
@@ -147,6 +152,14 @@ def engle_granger(
         Aligned formation-window price series. Same length, no NaNs.
     name_a, name_b : str
         Optional labels used only in the `direction` field of the result.
+    pvalue_method : "adf" or "mackinnon"
+        Phase 6 (D6.1). "adf" (default, Phase 2 behaviour) takes the p-value from
+        `adfuller` on the residuals — that distribution assumes an OBSERVED series,
+        so on estimated residuals it over-rejects the unit-root null (too many pairs
+        pass). "mackinnon" uses `statsmodels.tsa.stattools.coint`, whose p-values
+        come from MacKinnon's cointegration distribution — the statistically correct
+        Engle-Granger test. γ, α, residuals, and half-life are unchanged (same OLS);
+        only the p-value source differs.
 
     Returns
     -------
@@ -166,10 +179,23 @@ def engle_granger(
     residuals_AB, gamma_AB, alpha_AB = _ols_residuals(prices_a, prices_b)
     residuals_BA, gamma_BA, alpha_BA = _ols_residuals(prices_b, prices_a)
 
-    # ADF test on each — autolag="AIC" picks the lag order automatically.
-    # `regression="c"` includes a constant (paper convention).
-    p_AB = float(adfuller(residuals_AB.dropna(), autolag="AIC", regression="c")[1])
-    p_BA = float(adfuller(residuals_BA.dropna(), autolag="AIC", regression="c")[1])
+    if pvalue_method == "mackinnon":
+        # Proper Engle-Granger p-values (MacKinnon cointegration distribution).
+        # `coint` re-runs the same OLS internally; trend="c" matches our constant.
+        p_AB = float(coint(prices_a.to_numpy(), prices_b.to_numpy(),
+                           trend="c", autolag="aic")[1])
+        p_BA = float(coint(prices_b.to_numpy(), prices_a.to_numpy(),
+                           trend="c", autolag="aic")[1])
+    elif pvalue_method == "adf":
+        # ADF test on each — autolag="AIC" picks the lag order automatically.
+        # `regression="c"` includes a constant (paper convention). NOTE: these
+        # p-values are anti-conservative on estimated residuals (see docstring).
+        p_AB = float(adfuller(residuals_AB.dropna(), autolag="AIC", regression="c")[1])
+        p_BA = float(adfuller(residuals_BA.dropna(), autolag="AIC", regression="c")[1])
+    else:
+        raise ValueError(
+            f"unknown pvalue_method {pvalue_method!r}; expected 'adf' or 'mackinnon'"
+        )
 
     if p_AB <= p_BA:
         winning_residuals = residuals_AB
@@ -206,6 +232,7 @@ def filter_cointegrated_pairs(
     prices_panel: pd.DataFrame,
     p_threshold: float = COINTEGRATION_P_THRESHOLD,
     half_life_bounds: tuple[float, float] = HALF_LIFE_BOUNDS,
+    pvalue_method: PvalueMethod = "adf",
 ) -> tuple[list[tuple[int, int]], dict[tuple[int, int], CointegrationResult]]:
     """Apply Engle-Granger + half-life filter to a list of candidate pairs.
 
@@ -222,6 +249,9 @@ def filter_cointegrated_pairs(
     half_life_bounds : (float, float)
         (lower, upper) bounds in days; both inclusive. Default from
         `src/config.HALF_LIFE_BOUNDS` (= (5.0, 60.0)).
+    pvalue_method : "adf" or "mackinnon"
+        Phase 6 (D6.1) — see `engle_granger`. "mackinnon" is the statistically
+        correct Engle-Granger test; "adf" (default) reproduces Phase 2.
 
     Returns
     -------
@@ -241,8 +271,9 @@ def filter_cointegrated_pairs(
             res = engle_granger(
                 prices_panel[a], prices_panel[b],
                 name_a=str(a), name_b=str(b),
+                pvalue_method=pvalue_method,
             )
-        except (ValueError, Exception):
+        except Exception:
             continue
         results[(a, b)] = res
         if (

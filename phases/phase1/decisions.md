@@ -106,7 +106,7 @@ For cross-phase decisions (paper vs proposal reconciliation, build philosophy), 
   500 constituent for the *entire* 3-year formation window.
 - **Alternatives**: in-S&P-at-start; in-S&P-at-any-point.
 - **Rationale**: rigorous survivorship-bias prevention. Matches Phase 0 design.
-- **Empirical**: yields approximately 407 stocks per Dec-2023 window vs likely approximately 500 in the paper.
+- **Empirical**: yields ~407 stocks per Dec-2023 window vs likely ~500 in the paper.
   Suspected as a Sharpe-gap contributor (smaller universe → fewer good pairs).
   Will sensitivity-test softening this in Phase 3 / Phase 4.
 - **Status**: ✅ implemented in `src/panel.py::formation_window_panel`.

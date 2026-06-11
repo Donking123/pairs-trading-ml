@@ -79,6 +79,55 @@ def fit_hedge_ratio(prices_a: pd.Series, prices_b: pd.Series) -> HedgeRatio:
     return HedgeRatio(gamma=gamma, alpha=alpha, residual_std=residual_std, n_obs=n)
 
 
+def fit_hedge_ratio_rlm(prices_a: pd.Series, prices_b: pd.Series) -> HedgeRatio:
+    """Robust hedge ratio via RLM (Huber's T) — Phase 3b robustness cell.
+
+    Same model as `fit_hedge_ratio` (A = α + γ·B + ε) but estimated with iteratively
+    reweighted least squares (statsmodels RLM, Huber's T norm) instead of OLS, so a
+    handful of outlier days don't tilt γ. Returns the same `HedgeRatio` so it is a
+    drop-in replacement downstream.
+
+    `residual_std` is reported as the **robust scale** of the residuals (RLM's MAD-based
+    `scale`), which plays the role OLS's residual σ does — but note the trading z-score
+    is computed from the rolling window in `rolling_zscore`, not from this field, so the
+    exact definition here doesn't affect signals.
+
+    Parameters
+    ----------
+    prices_a, prices_b : Series
+        Aligned formation-window price series. Same length, no NaNs.
+
+    Returns
+    -------
+    HedgeRatio
+    """
+    import statsmodels.api as sm
+
+    if len(prices_a) != len(prices_b):
+        raise ValueError(
+            f"prices_a and prices_b length mismatch: {len(prices_a)} vs {len(prices_b)}"
+        )
+    if prices_a.isna().any() or prices_b.isna().any():
+        raise ValueError("price series contain NaNs — clean upstream")
+    n = len(prices_a)
+    if n < 2:
+        raise ValueError(f"need >= 2 obs to fit a regression, got {n}")
+
+    a = prices_a.to_numpy(dtype=float)
+    b = prices_b.to_numpy(dtype=float)
+    if float(((b - b.mean()) ** 2).sum()) == 0.0:
+        raise ValueError("regressor B has zero variance — cannot fit slope")
+
+    x = sm.add_constant(b)
+    model = sm.RLM(a, x, M=sm.robust.norms.HuberT()).fit()
+    alpha = float(model.params[0])
+    gamma = float(model.params[1])
+    # RLM's robust residual scale (MAD-based), analogous to OLS residual σ.
+    residual_std = float(model.scale)
+
+    return HedgeRatio(gamma=gamma, alpha=alpha, residual_std=residual_std, n_obs=n)
+
+
 def spread_series(
     prices_a: pd.Series, prices_b: pd.Series, hedge_ratio: HedgeRatio | float
 ) -> pd.Series:

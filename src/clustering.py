@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import itertools
 
+import numpy as np
 import pandas as pd
-from sklearn.cluster import OPTICS
+from sklearn.cluster import HDBSCAN, OPTICS, AgglomerativeClustering
 
 
 def sic_division(siccd) -> str:
@@ -85,6 +86,102 @@ def cluster_optics(
     )
     labels = model.fit_predict(distance_matrix.to_numpy())
     return pd.Series(labels, index=distance_matrix.index, name="cluster")
+
+
+def cluster_hdbscan(
+    distance_matrix: pd.DataFrame,
+    min_cluster_size: int = 2,
+    min_samples: int | None = None,
+) -> pd.Series:
+    """Cluster stocks with HDBSCAN on a precomputed distance matrix  [Phase 3a].
+
+    Robustness alternative to OPTICS. HDBSCAN is also density-based but extracts a
+    flat clustering from the condensed tree via cluster stability, rather than
+    OPTICS's reachability-steepness (xi) rule. It auto-determines the number of
+    clusters — there is no xi-equivalent to tune.
+
+    Parameters
+    ----------
+    distance_matrix : DataFrame
+        Square precomputed distance matrix from distances.py.
+    min_cluster_size : int
+        Smallest grouping to call a cluster (paper convention: 2).
+    min_samples : int, optional
+        Conservativeness of the density estimate. Defaults to `min_cluster_size`
+        when None (sklearn's own default behaviour).
+
+    Returns
+    -------
+    Series
+        Cluster label per stock (index = permno). Label -1 = outlier.
+    """
+    model = HDBSCAN(
+        metric="precomputed",
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+    )
+    # HDBSCAN needs a float64 contiguous matrix; precomputed must be non-negative.
+    dm = np.ascontiguousarray(distance_matrix.to_numpy(), dtype="float64")
+    labels = model.fit_predict(dm)
+    return pd.Series(labels, index=distance_matrix.index, name="cluster")
+
+
+def cluster_hierarchical(
+    distance_matrix: pd.DataFrame,
+    distance_threshold: float | None = None,
+    distance_quantile: float | None = None,
+    linkage: str = "average",
+    min_cluster_size: int = 2,
+) -> pd.Series:
+    """Agglomerative (hierarchical) clustering on a precomputed distance matrix [Phase 3a].
+
+    Robustness alternative to OPTICS. Builds a dendrogram by repeatedly merging the
+    closest groups, then cuts it at a height.
+
+    The cut height can be set two ways (exactly one required):
+      * `distance_threshold` — an absolute height (used by unit tests).
+      * `distance_quantile`  — a quantile of the off-diagonal pairwise distances,
+        computed per call. **This is the backtest default**: the absolute distance
+        scale drifts over the 21-year sample, so a fixed height gives wildly different
+        cluster counts across time (it would test threshold drift, not the algorithm).
+        A fixed *quantile* auto-adapts to the scale, keeping the candidate-pair count
+        temporally stable.
+
+    Note: **Ward linkage is not available here** — it requires raw Euclidean features,
+    whereas SSD/PC supply only a precomputed distance matrix. Average linkage is the
+    standard, correct choice for precomputed distances (complete/single also valid).
+
+    Clusters smaller than `min_cluster_size` (singletons when =2) are relabelled as
+    outliers (-1), matching the OPTICS/HDBSCAN convention.
+
+    Returns
+    -------
+    Series
+        Cluster label per stock (index = permno). Label -1 = outlier.
+    """
+    if (distance_threshold is None) == (distance_quantile is None):
+        raise ValueError("pass exactly one of distance_threshold or distance_quantile")
+
+    dm = distance_matrix.to_numpy()
+    if distance_quantile is not None:
+        iu = np.triu_indices_from(dm, k=1)
+        distance_threshold = float(np.quantile(dm[iu], distance_quantile))
+
+    model = AgglomerativeClustering(
+        metric="precomputed",
+        linkage=linkage,
+        distance_threshold=distance_threshold,
+        n_clusters=None,
+    )
+    raw = model.fit_predict(dm)
+    labels = pd.Series(raw, index=distance_matrix.index, name="cluster")
+
+    # Relabel singletons / sub-threshold groups as outliers (-1) for parity with
+    # the density-based methods.
+    sizes = labels.value_counts()
+    small = sizes.index[sizes < min_cluster_size]
+    labels = labels.where(~labels.isin(small), -1)
+    return labels
 
 
 def clusters_to_pairs(labels: pd.Series) -> list[tuple]:

@@ -1,0 +1,7 @@
+metric,cut_date,passed,overlap_days,pairs,mismatched_cells,mismatched_days
+pc,2017-12-31,True,3776,2376,0,0
+pc,2013-12-31,True,2768,2376,0,0
+pc,2009-12-31,True,1762,2376,0,0
+factor,2017-12-31,True,3776,3866,0,0
+factor,2013-12-31,True,2768,3866,0,0
+factor,2009-12-31,True,1762,3866,0,0

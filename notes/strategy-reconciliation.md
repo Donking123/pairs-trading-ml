@@ -86,7 +86,7 @@ should lower max drawdown. Report with / without.
 
 **Point 11 — Max open pairs.** No hard cap in the core (the paper's capital-scaled
 return handles unlimited pairs). Capacity analysed in Phase 4 at caps of 10/20/50.
-Paper's natural open-pair counts: SSD approximately 22, PC approximately 44, PCA approximately 58 — a flat "20" would bind
+Paper's natural open-pair counts: SSD ~22, PC ~44, PCA ~58 — a flat "20" would bind
 hard on PC/PCA.
 
 **Point 12 — Universe building.** CRSP-only — drop "Compustat / fundamental data" (we

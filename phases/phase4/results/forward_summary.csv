@@ -1,0 +1,3 @@
+metric,n_months,forward_sharpe,insample_sharpe,ann_ret,ann_vol,mdd,n_trades
+pc,23,0.858,1.028,0.015,0.0175,-0.0087,3293
+factor,23,0.117,1.013,0.0035,0.0345,-0.0279,2037

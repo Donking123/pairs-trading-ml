@@ -7,10 +7,10 @@ the pluggable heart of the project - every metric returns a square distance matr
 the same shape, so the clustering / trading / backtest code downstream never changes.
 
 Metrics, built phase by phase:
-    ssd_distance    Phase 1   sum of squared deviations of z-normalized prices
-    pc_distance     Phase 2   partial correlation of returns, market-controlled
-    beta_distance   Phase 3   Euclidean distance on factor-beta vectors  [extension]
-    pca_distance    Bonus     Euclidean distance on PCA-reconstructed returns
+    ssd_distance          Phase 1    sum of squared deviations of z-normalized prices
+    pc_distance           Phase 2    partial correlation of returns, market-controlled
+    factor_beta_distance  Phase 2.5  Euclidean distance on factor-beta vectors  [extension]
+    pca_distance          Bonus      Euclidean distance on PCA-reconstructed returns
 """
 from __future__ import annotations
 
@@ -186,3 +186,120 @@ def market_adjusted_returns(
         + np.outer(mkt.to_numpy(), betas.to_numpy())
     )
     return returns - predicted_arr
+
+
+def ridge_betas(
+    prices: pd.DataFrame,
+    factor_panel: pd.DataFrame,
+    ridge_alpha: float = 1.0,
+) -> pd.DataFrame:
+    """Ridge-regress each stock's returns on the factor panel → beta matrix.
+
+    For every stock i, fit (with an un-penalized intercept, via centering):
+
+        r_i,t = a_i + Σ_k β_i,k · f_k,t + ε_i,t
+
+    using ridge (L2) regression with penalty `ridge_alpha`. Ridge is used instead of
+    OLS because the 12 industry + 6 style factors are collinear, which makes OLS betas
+    unstable — and it's the *beta vectors* we cluster on (D2.5.3).
+
+    Solved in closed form for all stocks at once:
+        B = (Fc'Fc + α·I)^{-1} Fc' Rc
+    where Fc, Rc are the column-centered factor and return matrices. The intercept is
+    absorbed by centering and is not penalized.
+
+    Parameters
+    ----------
+    prices : DataFrame
+        Formation-window prices, rows = dates, columns = permno (no NaNs).
+    factor_panel : DataFrame
+        Daily factors (rows = dates, columns = factor names), e.g. from
+        `factors.build_factor_panel`.
+    ridge_alpha : float
+        L2 penalty. Larger = more shrinkage toward zero betas.
+
+    Returns
+    -------
+    DataFrame
+        Beta matrix: rows = permno (stocks), columns = factor names.
+    """
+    if prices.isna().any().any():
+        raise ValueError("prices contains NaNs - pass only fully-priced stocks")
+    if ridge_alpha < 0:
+        raise ValueError("ridge_alpha must be >= 0")
+
+    returns = prices.pct_change().iloc[1:]
+    # Align stocks' returns and the factor panel on common dates (inner join).
+    common = returns.index.intersection(factor_panel.index)
+    if len(common) < factor_panel.shape[1] + 2:
+        raise ValueError(
+            f"only {len(common)} aligned dates for {factor_panel.shape[1]} factors"
+        )
+    R = returns.loc[common]                       # n × m (m stocks)
+    F = factor_panel.loc[common]                  # n × k (k factors)
+
+    # Center both (un-penalized intercept). Coerce to float64 — parquet-loaded
+    # factor columns can arrive as object/decimal dtype.
+    F = F.astype("float64")
+    R = R.astype("float64")
+    Fc = (F - F.mean()).to_numpy()                # n × k
+    Rc = (R - R.mean()).to_numpy()                # n × m
+    k = Fc.shape[1]
+
+    gram = Fc.T @ Fc + ridge_alpha * np.eye(k)    # k × k
+    betas = np.linalg.solve(gram, Fc.T @ Rc)      # k × m
+
+    return pd.DataFrame(betas.T, index=R.columns, columns=F.columns)
+
+
+def factor_beta_distance(
+    prices: pd.DataFrame,
+    factor_panel: pd.DataFrame,
+    ridge_alpha: float = 1.0,
+) -> pd.DataFrame:
+    """Factor-beta distance — cluster stocks by risk-factor exposure  [Phase 2.5].
+
+    The QF621 group's extension beyond the Rotondi & Russo replication. Where SSD
+    compares price *trajectories* and PC compares *idiosyncratic-return* co-movement,
+    this compares **factor-exposure vectors**: two stocks are "close" if they load
+    similarly on the same risk factors (style + industry), so a shock to a shared
+    factor pushes both the same way and the spread mean-reverts.
+
+    Steps:
+      1. Ridge-regress each stock's returns on the factor panel → β vector (per stock).
+      2. Standardize each β dimension (z-score across stocks) so no single factor
+         dominates the distance purely by its beta scale (D2.5.4).
+      3. Euclidean distance between standardized β vectors.
+
+    Parameters
+    ----------
+    prices : DataFrame
+        Formation-window prices, rows = dates, columns = permno (no NaNs).
+    factor_panel : DataFrame
+        Daily factor panel from `factors.build_factor_panel` (style + industry).
+    ridge_alpha : float
+        L2 penalty for the beta regression (see `ridge_betas`).
+
+    Returns
+    -------
+    DataFrame
+        Square distance matrix; index and columns are permno, diagonal exactly zero.
+        Unlike SSD/PC this is NOT bounded in [0, 2] — it's a Euclidean distance in
+        standardized β-space, so OPTICS `xi` must be tuned for this geometry
+        (see config.OPTICS_XI_FACTOR).
+    """
+    if prices.shape[1] < 2:
+        raise ValueError("need at least two stocks to form a distance matrix")
+
+    betas = ridge_betas(prices, factor_panel, ridge_alpha=ridge_alpha)
+
+    # Standardize each factor's betas across stocks (z-score per column).
+    std = betas.std(ddof=1)
+    std = std.replace(0.0, 1.0)                    # guard a degenerate constant factor
+    z = (betas - betas.mean()) / std
+
+    dist = squareform(pdist(z.to_numpy(), metric="euclidean"))
+    distance = pd.DataFrame(dist, index=betas.index, columns=betas.index)
+    np.fill_diagonal(distance.values, 0.0)
+
+    return distance
