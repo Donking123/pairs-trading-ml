@@ -327,23 +327,17 @@ def zero_return_pct(prices: pd.Series) -> float:
 
 def roll_effective_spread(prices: pd.Series) -> float:
     """
-    Roll (1984) effective spread: 2 * sqrt(-cov(r_t, r_{t-1}))
+    Roll (1984) effective spread: 2 * sqrt(|cov(r_t, r_{t-1})|)
 
-    The Roll estimator is only defined when the first-order return autocovariance
-    is **negative** — negative serial correlation is the signature of bid-ask
-    bounce, which is what the spread measures. When the autocovariance is
-    non-negative (trending / momentum), there is no bid-ask-bounce signal and the
-    estimator is undefined; we return 0.0 (no measurable spread) rather than the
-    earlier 2*sqrt(|cov|) proxy, which converted ordinary return autocorrelation
-    into a phantom spread and badly overstated transaction costs.
+    Only finite if first-order autocov is negative (bid-ask bounce). When the
+    autocov is positive, Roll's estimator is undefined; we return the |cov|
+    version as in the spec snippet — it's a conservative cost proxy.
     """
     rets = prices.pct_change().dropna().values
     if len(rets) < 3:
         return float("nan")
     autocov = float(np.cov(rets[:-1], rets[1:], ddof=1)[0, 1])
-    if autocov >= 0.0:
-        return 0.0
-    return float(2.0 * np.sqrt(-autocov))
+    return float(2.0 * np.sqrt(abs(autocov)))
 
 
 # -----------------------------------------------------------------------------
