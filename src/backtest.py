@@ -292,6 +292,7 @@ def simulate_pair_in_month(
     stop_cooldown: bool = False,
     block_last_day_entry: bool = False,
     delisting_fix: bool = False,
+    frozen_sigma: float | None = None,
 ) -> tuple[list[Trade], pd.Series, pd.Series, int, CarryState | None]:
     """Simulate ONE pair across ONE trading month.
 
@@ -346,7 +347,7 @@ def simulate_pair_in_month(
     prices_a = panel[permno_a]
     prices_b = panel[permno_b]
     spread = spread_series(prices_a, prices_b, gamma)
-    z = rolling_zscore(spread, window=zscore_window)
+    z = rolling_zscore(spread, window=zscore_window, frozen_sigma=frozen_sigma)
 
     # find delisting events that fall on or before the end of the trading month
     dlst_a = delisting_events.get(permno_a)
@@ -616,6 +617,7 @@ def run_one_month(
     stop_cooldown: bool = False,
     block_last_day_entry: bool = False,
     delisting_fix: bool = False,
+    use_frozen_sigma: bool = False,
 ) -> MonthResult:
     """Run the full pipeline for one month.
 
@@ -649,6 +651,10 @@ def run_one_month(
       delisting_fix : D6.2 — corrected delisting-code fallback map, compounded
           delisting-day return, weekend/holiday delisting dates snapped to the next
           trading day, and delisting closes no longer skipped on NaN z.
+      use_frozen_sigma : if True, use the formation-window OLS residual std (from
+          fit_hedge_ratio) as the fixed z-score denominator instead of the default
+          rolling std. Anchors volatility to what was observed before trading began,
+          so a spread that widens mid-month doesn't shrink the z-score.
     """
     fit_gamma = fit_hedge_ratio if hedge_method == "ols" else fit_hedge_ratio_rlm
     # ── formation ─────────────────────────────────────────────────────────
@@ -813,6 +819,7 @@ def run_one_month(
         #     with the spread oriented the way the filter validated it;
         #   otherwise → freshly fit A-on-B OLS (Phases 1–5 behaviour).
         sim_a, sim_b = permno_a, permno_b
+        pair_frozen_sigma: float | None = None
         if cs is not None:
             sim_a, sim_b = cs.permno_a, cs.permno_b
             gamma = cs.gamma_frozen
@@ -821,11 +828,17 @@ def run_one_month(
             if res.direction == f"{permno_b}_on_{permno_a}":
                 sim_a, sim_b = permno_b, permno_a
             gamma = res.gamma
+            if use_frozen_sigma:
+                s = getattr(res, "residual_std", float("nan"))
+                pair_frozen_sigma = s if (s == s and s > 0) else None  # NaN-safe
         else:
             try:
-                gamma = fit_gamma(
+                hr = fit_gamma(
                     formation_panel[permno_a], formation_panel[permno_b]
-                ).gamma
+                )
+                gamma = hr.gamma
+                if use_frozen_sigma and hr.residual_std > 0:
+                    pair_frozen_sigma = hr.residual_std
             except ValueError:
                 continue
 
@@ -839,6 +852,7 @@ def run_one_month(
             carry=cs, carry_over=carry_over, max_carry_months=max_carry_months,
             execution_delay=execution_delay, stop_cooldown=stop_cooldown,
             block_last_day_entry=block_last_day_entry, delisting_fix=delisting_fix,
+            frozen_sigma=pair_frozen_sigma,
         )
         if carry_out is not None:
             new_carry[key] = carry_out
@@ -950,6 +964,7 @@ def run_backtest(
     stop_cooldown: bool = False,
     block_last_day_entry: bool = False,
     delisting_fix: bool = False,
+    use_frozen_sigma: bool = False,
     verbose: bool = True,
 ) -> tuple[pd.DataFrame, list[Trade]]:
     """Run the rolling monthly backtest.
@@ -1049,6 +1064,7 @@ def run_backtest(
                 stop_cooldown=stop_cooldown,
                 block_last_day_entry=block_last_day_entry,
                 delisting_fix=delisting_fix,
+                use_frozen_sigma=use_frozen_sigma,
             )
         except ValueError as e:
             if verbose:
