@@ -196,7 +196,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="optional CSV with columns 'date,vix'; overrides internal proxy")
     p.add_argument("--vol-window", type=int, default=20,
                    help="rolling window (days) for realised vol proxy")
-    p.add_argument("--metric", default="ruce_net",
+    p.add_argument("--metric", default="roce_net",
                    choices=["roce", "ruce", "roce_net", "ruce_net"])
     p.add_argument("--out-dir", type=Path,
                    default=_REPO_ROOT / "review" / "output"

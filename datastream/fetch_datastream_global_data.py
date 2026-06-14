@@ -56,7 +56,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("fetch_global")
 
-start_date = date(2026, 4, 30) - timedelta(days=365 * 15)
+start_date = date(2026, 4, 30) - timedelta(days=365 * 20)
 end_date = date(2026, 4, 30)
 
 ASIAN_EXCHANGES: set[str] = {

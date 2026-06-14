@@ -358,9 +358,6 @@ def run_research(
                 p.k0              = params["k0"]
                 p.kc              = params["kc"]
 
-            cfg = {"T": params["T"], "H": params["H"],
-                   "k0": params["k0"], "kc": params["kc"]}
-
             run_trades:     list = []
             eligible_pairs: list = []
 
@@ -376,7 +373,7 @@ def run_research(
                     continue
                 eligible_pairs.append(pair)
                 pair_trades = _bt.backtest_pair(
-                    pair, df_run, cfg,
+                    pair, df_run,
                     start=test_start,
                     end=test_end,
                     max_overnight_gap_days=max_overnight_gap,

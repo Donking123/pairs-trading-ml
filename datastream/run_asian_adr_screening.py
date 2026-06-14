@@ -126,14 +126,17 @@ def _snap_raw_ratio(raw: float) -> Optional[float]:
 
 
 def _adj_prices(df: pd.DataFrame, price_col: str = "close") -> pd.Series:
-    """Return price-return-adjusted prices: adj = raw / cumadjfactor.
-    In WRDS Datastream cumadjfactor > 1 for dates prior to splits and
-    bonus issues. Falls back to raw prices when adj_factor is absent or invalid."""
+    """Return price-return-adjusted prices: adj = raw * adj_factor.
+    In this Datastream extract adj_factor is a MULTIPLICATIVE adjustment: at a
+    split/redenomination the raw price jumps and adj_factor moves inversely so
+    that raw * adj_factor stays continuous across the corporate action. (Must
+    match run_backtest._adj_prices.) Falls back to raw prices when adj_factor
+    is absent or invalid."""
     p = df[price_col].copy().astype(float)
     if "adj_factor" in df.columns:
         f = pd.to_numeric(df["adj_factor"], errors="coerce")
         f = f.where(f > 0, other=1.0).fillna(1.0)
-        p = p / f
+        p = p * f
     return p
 
 
@@ -158,7 +161,7 @@ def _bulk_estimate_ratios(
     if "adj_factor" in _adr.columns:
         _f = pd.to_numeric(_adr["adj_factor"], errors="coerce").where(lambda x: x > 0, other=1.0).fillna(1.0)
         _adr = _adr.copy()
-        _adr["close"] = _adr["close"].astype(float) / _f.values
+        _adr["close"] = _adr["close"].astype(float) * _f.values
 
     # pivot ADR adjusted closes: index=date, columns=ticker
     adr_wide = _adr.pivot_table(index="marketdate", columns="ticker", values="close", aggfunc="last")
@@ -168,7 +171,7 @@ def _bulk_estimate_ratios(
     if "adj_factor" in _loc.columns:
         _f = pd.to_numeric(_loc["adj_factor"], errors="coerce").where(lambda x: x > 0, other=1.0).fillna(1.0)
         _loc = _loc.copy()
-        _loc["close"] = _loc["close"].astype(float) / _f.values
+        _loc["close"] = _loc["close"].astype(float) * _f.values
 
     # pivot local adjusted closes: index=date, columns=ticker
     loc_wide = _loc.pivot_table(index="marketdate", columns="ticker", values="close", aggfunc="last")
@@ -324,17 +327,23 @@ def zero_return_pct(prices: pd.Series) -> float:
 
 def roll_effective_spread(prices: pd.Series) -> float:
     """
-    Roll (1984) effective spread: 2 * sqrt(|cov(r_t, r_{t-1})|)
+    Roll (1984) effective spread: 2 * sqrt(-cov(r_t, r_{t-1}))
 
-    Only finite if first-order autocov is negative (bid-ask bounce). When the
-    autocov is positive, Roll's estimator is undefined; we return the |cov|
-    version as in the spec snippet — it's a conservative cost proxy.
+    The Roll estimator is only defined when the first-order return autocovariance
+    is **negative** — negative serial correlation is the signature of bid-ask
+    bounce, which is what the spread measures. When the autocovariance is
+    non-negative (trending / momentum), there is no bid-ask-bounce signal and the
+    estimator is undefined; we return 0.0 (no measurable spread) rather than the
+    earlier 2*sqrt(|cov|) proxy, which converted ordinary return autocorrelation
+    into a phantom spread and badly overstated transaction costs.
     """
     rets = prices.pct_change().dropna().values
     if len(rets) < 3:
         return float("nan")
     autocov = float(np.cov(rets[:-1], rets[1:], ddof=1)[0, 1])
-    return float(2.0 * np.sqrt(abs(autocov)))
+    if autocov >= 0.0:
+        return 0.0
+    return float(2.0 * np.sqrt(-autocov))
 
 
 # -----------------------------------------------------------------------------

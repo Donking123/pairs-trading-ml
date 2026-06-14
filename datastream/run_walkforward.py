@@ -37,9 +37,9 @@ Usage
         --adr-reference datastream/data/parquet/adr/adr_reference.parquet \
         --global-prices datastream/data/parquet/global/global_prices.parquet \
         --fx-rates      datastream/data/parquet/fx/fx_rates.parquet \
-        --train-start   2015-01-01 \
-        --split         2021-12-31 \
-        --test-end      2024-12-31 \
+        --train-start   2010-01-01 \
+        --split         2020-12-31 \
+        --test-end      2025-12-31 \
         --out-dir       research/output/walkforward_$(date +%Y%m%d_%H%M%S)
 
 For an expanding walk-forward with 3 OOS folds between ``--split`` and
@@ -158,7 +158,7 @@ def run_fold(
     # cointegration/liquidity decisions use no post-split data.
     train_adr = adr_prices[adr_prices["marketdate"] >= pd.Timestamp(train_start)]
     train_glb = global_prices[global_prices["marketdate"] >= pd.Timestamp(train_start)]
-    approved, _diag = _screen.run_pipeline(
+    approved, _ = _screen.run_pipeline(
         train_adr, adr_reference, train_glb, fx_rates, train_end, cfg,
     )
     log.info("fold %d: %d pairs approved on train window", fold_idx, len(approved))
@@ -190,8 +190,6 @@ def run_fold(
     # the panel directly to avoid re-reading. Mirror load_panel's join logic.
     panel = _build_panel(adr_prices, global_prices, fx_rates, pairs)
 
-    bt_cfg = {"T": cfg["estimation_days"], "H": cfg["holding_days"],
-              "k0": cfg["k0"], "kc": cfg["kc"]}
     trades: list = []
     test_start = train_end + timedelta(days=1)
     for pair in pairs:
@@ -199,7 +197,7 @@ def run_fold(
         if df is None:
             continue
         pair_trades = _bt.backtest_pair(
-            pair, df, bt_cfg, start=test_start, end=test_end,
+            pair, df, start=test_start, end=test_end,
             max_overnight_gap_days=cfg.get("max_overnight_gap", 4),
         )
         trades.extend(pair_trades)
@@ -233,7 +231,7 @@ def _build_panel(
             columns={pair.underlying_currency: "fx_mid"}
         )
 
-        # apply price-return adjustment (adj = raw / cumadjfactor)
+        # apply price-return adjustment (adj = raw * adj_factor)
         adr_slice = _bt._adj_prices(adr_raw, "close").rename("adr_close").to_frame()
         loc_close_adj = _bt._adj_prices(loc_raw, "close").rename("local_close")
 
@@ -280,19 +278,22 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    default=_DATASTREAM / "data" / "walkforward_output"
                    / f"walkforward_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 
-    p.add_argument("--train-start", type=_parse_date, required=True,
+    p.add_argument("--train-start", type=_parse_date, default=_parse_date("2010-01-01"),
                    help="first date used for pair selection")
-    p.add_argument("--split", type=_parse_date, required=True,
+    p.add_argument("--split", type=_parse_date, default=_parse_date("2020-12-31"),
                    help="train/test boundary: selection uses <= split, trading uses > split")
-    p.add_argument("--test-end", type=_parse_date, required=True,
+    p.add_argument("--test-end", type=_parse_date, default=_parse_date("2025-12-31"),
                    help="last date traded out-of-sample")
     p.add_argument("--folds", type=int, default=1,
                    help="1 = single holdout; >1 = expanding walk-forward")
 
     # strategy params (passed through to screening + backtest)
-    p.add_argument("--estimation-days", type=int, default=60, help="T")
+    # Defaults are the optimum from datastream/run_research_permutations.py
+    # (T=90, k0=2.50, kc=0.0, H=90): k0=2.50 and kc=0.0 are the robust signals;
+    # T=90 vs T=60 is within noise.
+    p.add_argument("--estimation-days", type=int, default=90, help="T")
     p.add_argument("--holding-days", type=int, default=90, help="H")
-    p.add_argument("--k0", type=float, default=2.0)
+    p.add_argument("--k0", type=float, default=2.5)
     p.add_argument("--kc", type=float, default=0.0)
     p.add_argument("--cointegration-alpha", type=float, default=0.05)
     p.add_argument("--min-history-days", type=int, default=504)

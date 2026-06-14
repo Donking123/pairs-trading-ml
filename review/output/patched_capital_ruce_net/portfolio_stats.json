@@ -1,0 +1,22 @@
+{
+  "n_days": 3675,
+  "n_active_days": 3638,
+  "total_return": 49.906647,
+  "annualised_return": 0.308469,
+  "annualised_vol": 0.069589,
+  "rf": 0.015,
+  "sharpe": 3.6935,
+  "sharpe_nw": 1.874,
+  "nw_lags": 252,
+  "sortino": 6.0108,
+  "max_drawdown": -0.046307,
+  "calmar": 6.6614,
+  "hit_rate": 0.63,
+  "final_equity": 50.906647,
+  "metric": "ruce_net",
+  "weight": "capital",
+  "return_mode": "mark_to_market",
+  "mtm_trades_marked": 3027,
+  "mtm_trades_unmatched": 0,
+  "mtm_coverage": 1.0
+}

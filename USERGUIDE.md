@@ -151,9 +151,18 @@ python3 datastream/run_walkforward.py \
 **Outputs** in `--out-dir`: `summary.json`, `distribution.json`, `folds.json`,
 **`trades_oos.csv`** ← this file feeds the entire review suite in Step 6.
 
-**Reference result (single fold above):** ~148 pairs selected on train, ~1,940
-OOS trades, median RUCE-net ≈ 4.9% — consistent with in-sample, confirming the
-edge survives proper train/test separation.
+The strategy parameters now **default to the optimum found by
+`run_research_permutations.py`** (`T=90, k0=2.50, kc=0.0, H=90`), so the command
+above needs no `--k0/--kc/--T/--H` flags. The robust signals are the more
+selective entry `k0=2.50` and full-convergence exit `kc=0.0`; `T=90` vs `T=60`
+is within noise.
+
+**Reference result (single fold above, T=90/k0=2.50 defaults):** 148 pairs
+selected on train, 982 OOS trades, median RUCE-net ≈ 5.3% (ROCE-net ≈ 2.6%,
+median duration 6 days). The more selective `k0=2.50` roughly halves trade count
+versus the old `k0=2.0` (~1,940 trades) while *raising* median RUCE-net from
+≈ 4.9% to ≈ 5.3% — higher-quality trades, and the edge survives proper
+train/test separation *including* fully out-of-sample pair re-selection.
 
 ---
 

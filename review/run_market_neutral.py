@@ -196,7 +196,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--market-returns", type=Path, default=None,
                    help="optional external benchmark CSV with columns 'date,return'; "
                         "overrides the internal local-equity proxy")
-    p.add_argument("--metric", default="ruce_net",
+    p.add_argument("--metric", default="roce_net",
                    choices=["roce", "ruce", "roce_net", "ruce_net"])
     p.add_argument("--max-concurrent", type=int, default=20,
                    help="capital slots for equal-weight daily-return construction")

@@ -283,7 +283,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    default=_DATASTREAM / "data/parquet/global/global_prices.parquet")
     p.add_argument("--fx-rates", type=Path,
                    default=_DATASTREAM / "data/parquet/fx/fx_rates.parquet")
-    p.add_argument("--metric", default="ruce_net",
+    p.add_argument("--metric", default="roce_net",
                    choices=["roce", "ruce", "roce_net", "ruce_net"])
     p.add_argument("--holding-days", type=int, default=90)
     p.add_argument("--n-sims", type=int, default=1000, help="random-entry simulations")
