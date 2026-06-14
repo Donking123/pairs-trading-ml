@@ -52,6 +52,7 @@ class CointegrationResult:
     direction: str             # "A_on_B" or "B_on_A" — which gave the lower p-value
     half_life: float           # AR(1) half-life of the residual spread (in days)
     n_obs: int
+    residual_std: float = float("nan")  # formation-window OLS spread σ (for frozen-σ z-score)
 
     @property
     def is_stationary(self) -> bool:
@@ -211,6 +212,7 @@ def engle_granger(
         winning_direction = f"{name_b}_on_{name_a}"
 
     hl = half_life_ar1(winning_residuals)
+    res_std = float(winning_residuals.dropna().std(ddof=1))
 
     return CointegrationResult(
         adf_pvalue=winning_p,
@@ -219,6 +221,7 @@ def engle_granger(
         direction=winning_direction,
         half_life=hl,
         n_obs=n,
+        residual_std=res_std,
     )
 
 
