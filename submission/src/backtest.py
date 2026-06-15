@@ -292,6 +292,7 @@ def simulate_pair_in_month(
     stop_cooldown: bool = False,
     block_last_day_entry: bool = False,
     delisting_fix: bool = False,
+    frozen_sigma: float | None = None,
 ) -> tuple[list[Trade], pd.Series, pd.Series, int, CarryState | None]:
     """Simulate ONE pair across ONE trading month.
 
@@ -346,7 +347,7 @@ def simulate_pair_in_month(
     prices_a = panel[permno_a]
     prices_b = panel[permno_b]
     spread = spread_series(prices_a, prices_b, gamma)
-    z = rolling_zscore(spread, window=zscore_window)
+    z = rolling_zscore(spread, window=zscore_window, frozen_sigma=frozen_sigma)
 
     # find delisting events that fall on or before the end of the trading month
     dlst_a = delisting_events.get(permno_a)
@@ -616,6 +617,7 @@ def run_one_month(
     stop_cooldown: bool = False,
     block_last_day_entry: bool = False,
     delisting_fix: bool = False,
+    use_frozen_sigma: bool = False,
 ) -> MonthResult:
     """Run the full pipeline for one month.
 
@@ -813,21 +815,35 @@ def run_one_month(
         #     with the spread oriented the way the filter validated it;
         #   otherwise → freshly fit A-on-B OLS (Phases 1–5 behaviour).
         sim_a, sim_b = permno_a, permno_b
+        pair_frozen_sigma: float | None = None
         if cs is not None:
             sim_a, sim_b = cs.permno_a, cs.permno_b
             gamma = cs.gamma_frozen
+            # carried position: sigma anchored when originally opened; skip re-estimation
         elif use_coint_gamma and key in coint_results:
             res = coint_results[key]
             if res.direction == f"{permno_b}_on_{permno_a}":
                 sim_a, sim_b = permno_b, permno_a
             gamma = res.gamma
+            if use_frozen_sigma:
+                s = res.residual_std
+                pair_frozen_sigma = s if (np.isfinite(s) and s > 0) else None
         else:
             try:
-                gamma = fit_gamma(
+                _hr = fit_gamma(
                     formation_panel[permno_a], formation_panel[permno_b]
-                ).gamma
+                )
             except ValueError:
                 continue
+            gamma = _hr.gamma
+            if use_frozen_sigma:
+                pair_frozen_sigma = _hr.residual_std if _hr.residual_std > 0 else None
+
+        # when cointegration filter ran (use_coint_gamma=False), coint residual_std
+        # is available and preferred over the OLS fit above (same formation window).
+        if use_frozen_sigma and pair_frozen_sigma is None and cs is None and key in coint_results:
+            s = getattr(coint_results[key], "residual_std", float("nan"))
+            pair_frozen_sigma = s if (np.isfinite(s) and s > 0) else None
 
         pair_trades, pair_ret, pair_wt, days_open, carry_out = simulate_pair_in_month(
             sim_a, sim_b, gamma,
@@ -839,6 +855,7 @@ def run_one_month(
             carry=cs, carry_over=carry_over, max_carry_months=max_carry_months,
             execution_delay=execution_delay, stop_cooldown=stop_cooldown,
             block_last_day_entry=block_last_day_entry, delisting_fix=delisting_fix,
+            frozen_sigma=pair_frozen_sigma,
         )
         if carry_out is not None:
             new_carry[key] = carry_out
@@ -950,6 +967,7 @@ def run_backtest(
     stop_cooldown: bool = False,
     block_last_day_entry: bool = False,
     delisting_fix: bool = False,
+    use_frozen_sigma: bool = False,
     verbose: bool = True,
 ) -> tuple[pd.DataFrame, list[Trade]]:
     """Run the rolling monthly backtest.
@@ -1049,6 +1067,7 @@ def run_backtest(
                 stop_cooldown=stop_cooldown,
                 block_last_day_entry=block_last_day_entry,
                 delisting_fix=delisting_fix,
+                use_frozen_sigma=use_frozen_sigma,
             )
         except ValueError as e:
             if verbose:

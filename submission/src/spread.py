@@ -157,14 +157,21 @@ def spread_series(
     return aligned_a - gamma * aligned_b
 
 
-def rolling_zscore(spread: pd.Series, window: int = 126) -> pd.Series:
+def rolling_zscore(
+    spread: pd.Series,
+    window: int = 126,
+    frozen_sigma: float | None = None,
+) -> pd.Series:
     """Rolling z-score with strict look-ahead protection.
 
-    z_t = (spread_t - μ_{t-1}) / σ_{t-1}
+    z_t = (spread_t - μ_{t-1}) / σ
 
-    Where μ_{t-1}, σ_{t-1} are the mean/std of spread over the `window` days
-    ending on (and including) day t-1 — never day t. This is enforced via
-    `.shift(1)`.
+    Where μ_{t-1} is the rolling mean over `window` days ending on day t-1
+    (never day t — enforced via `.shift(1)`). σ is either:
+      - rolling std over the same window (default), or
+      - a fixed `frozen_sigma` estimated on the formation window, which anchors
+        volatility to what was observed before trading began so that a widening
+        spread mid-month does not inflate the denominator and shrink z-scores.
 
     Parameters
     ----------
@@ -172,17 +179,23 @@ def rolling_zscore(spread: pd.Series, window: int = 126) -> pd.Series:
         Output of spread_series(); single pair's spread time series.
     window : int
         Rolling window in trading days. Paper default = 126 (~6 months).
+    frozen_sigma : float or None
+        If provided, used as the fixed denominator instead of rolling std.
+        Pass `HedgeRatio.residual_std` or `CointegrationResult.residual_std`.
 
     Returns
     -------
     Series
-        z-scores; first `window` entries are NaN (insufficient history).
+        z-scores; first `window` entries are NaN when frozen_sigma is None.
     """
     if window < 2:
         raise ValueError(f"window must be >= 2, got {window}")
     # shift(1) -> at day t we only see spread up to day t-1 in the rolling window
     past = spread.shift(1)
     mu = past.rolling(window=window, min_periods=window).mean()
-    sigma = past.rolling(window=window, min_periods=window).std(ddof=1)
+    if frozen_sigma is not None:
+        sigma: pd.Series | float = frozen_sigma
+    else:
+        sigma = past.rolling(window=window, min_periods=window).std(ddof=1)
     z = (spread - mu) / sigma
     return z
