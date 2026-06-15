@@ -293,6 +293,7 @@ def simulate_pair_in_month(
     block_last_day_entry: bool = False,
     delisting_fix: bool = False,
     frozen_sigma: float | None = None,
+    position_weight: float | None = None,
 ) -> tuple[list[Trade], pd.Series, pd.Series, int, CarryState | None]:
     """Simulate ONE pair across ONE trading month.
 
@@ -374,7 +375,7 @@ def simulate_pair_in_month(
 
     trades: list[Trade] = []
     daily_pnl: list[float] = []
-    daily_weight: list[float] = []   # |entry_z| of the open position that day, else 0
+    daily_weight: list[float] = []   # weight of the open position that day, else 0
     days_in_position = 0
 
     # realism (Phase 4a) — all zero/no-op when realism is frictionless
@@ -435,7 +436,7 @@ def simulate_pair_in_month(
             day_ret -= borrow_daily       # borrow fee on the short leg (0 if frictionless)
             current_trade_pnl += day_ret  # accumulate gross P&L for this trade
             days_in_position += 1
-            daily_weight.append(abs(entry_z))   # weight by entry dislocation
+            daily_weight.append(position_weight if position_weight is not None else abs(entry_z))
         else:
             day_ret = 0.0
             daily_weight.append(0.0)
@@ -584,6 +585,61 @@ def simulate_pair_in_month(
 
 
 # ────────────────────────────────────────────────────────────────────────────────
+# pair quality ranking helper
+# ────────────────────────────────────────────────────────────────────────────────
+
+
+def _select_top_k_pairs(
+    pairs: list[tuple[int, int]],
+    coint_results: dict,
+    k: int,
+) -> list[tuple[int, int]]:
+    """Return the top-k pairs ranked by composite quality score.
+
+    quality = ((1 - rank_p) + (1 - rank_hl) + rank_std) / 3
+
+    rank_p   : rank by ADF p-value ascending (lower p → smaller rank → higher 1-rank)
+    rank_hl  : rank by half-life ascending (shorter HL → smaller rank → higher 1-rank)
+    rank_std : rank by residual_std ascending (larger std → higher rank)
+
+    All ranks normalised to [0, 1] over the pairs in `coint_results`.
+    Pairs absent from coint_results (e.g. carry-ins) are appended last.
+    """
+    if len(pairs) <= k:
+        return pairs
+
+    records = []
+    for pair in pairs:
+        if pair not in coint_results:
+            continue
+        res = coint_results[pair]
+        if np.isnan(res.half_life) or res.half_life <= 0:
+            continue
+        records.append({
+            "pair": pair,
+            "p": res.adf_pvalue,
+            "hl": res.half_life,
+            "std": getattr(res, "residual_std", float("nan")),
+        })
+
+    if not records:
+        return pairs[:k]
+
+    df = pd.DataFrame(records).set_index("pair")
+    n = len(df)
+    df["rank_p"]   = df["p"].rank(ascending=True) / n
+    df["rank_hl"]  = df["hl"].rank(ascending=True) / n
+    df["rank_std"] = df["std"].rank(ascending=True) / n
+    df["quality"]  = ((1 - df["rank_p"]) + (1 - df["rank_hl"]) + df["rank_std"]) / 3
+
+    top = df.nlargest(k, "quality").index.tolist()
+    # preserve list ordering of any pairs not in coint_results (shouldn't happen
+    # after the filter, but guard just in case)
+    extra = [p for p in pairs if p not in df.index]
+    return (top + extra)[:k]
+
+
+# ────────────────────────────────────────────────────────────────────────────────
 # monthly orchestrator
 # ────────────────────────────────────────────────────────────────────────────────
 
@@ -604,7 +660,7 @@ def run_one_month(
     market_returns: pd.Series | None = None,
     clusterer: Literal["optics", "hdbscan", "hierarchical"] = "optics",
     hedge_method: Literal["ols", "rlm"] = "ols",
-    allocation: Literal["equal", "zweight"] = "equal",
+    allocation: Literal["equal", "zweight", "inv_halflife"] = "equal",
     realism: RealismConfig = RealismConfig(),
     spread_panel: pd.DataFrame | None = None,
     style_factors: pd.DataFrame | None = None,
@@ -618,6 +674,7 @@ def run_one_month(
     block_last_day_entry: bool = False,
     delisting_fix: bool = False,
     use_frozen_sigma: bool = False,
+    top_k: int | None = None,
 ) -> MonthResult:
     """Run the full pipeline for one month.
 
@@ -715,6 +772,20 @@ def run_one_month(
             half_life_bounds=HALF_LIFE_BOUNDS,
             pvalue_method=coint_pvalue,
         )
+
+    # ── (optional) top-k quality ranking ──────────────────────────────────
+    # Ranks surviving pairs by composite quality (p-value + half-life + spread σ)
+    # and keeps the best k. Requires cointegration_filter=True for p-values / HLs.
+    if top_k is not None and cointegration_filter and coint_results:
+        candidate_pairs = _select_top_k_pairs(candidate_pairs, coint_results, top_k)
+
+    # ── pre-compute inverse-half-life weights for inv_halflife allocation ──
+    inv_hl_weights: dict[tuple[int, int], float] = {}
+    if allocation == "inv_halflife" and coint_results:
+        for key, res in coint_results.items():
+            hl = getattr(res, "half_life", float("nan"))
+            if not np.isnan(hl) and hl > 0:
+                inv_hl_weights[key] = 1.0 / hl
 
     carry_in = carry_in or {}
     if not candidate_pairs:
@@ -856,6 +927,7 @@ def run_one_month(
             execution_delay=execution_delay, stop_cooldown=stop_cooldown,
             block_last_day_entry=block_last_day_entry, delisting_fix=delisting_fix,
             frozen_sigma=pair_frozen_sigma,
+            position_weight=inv_hl_weights.get(key) if allocation == "inv_halflife" else None,
         )
         if carry_out is not None:
             new_carry[key] = carry_out
@@ -898,7 +970,9 @@ def run_one_month(
             daily_portfolio = (
                 all_returns.where(all_returns != 0).mean(axis=1).fillna(0.0)
             )
-        elif allocation == "zweight":
+        elif allocation in ("zweight", "inv_halflife"):
+            # zweight: pair_weights = |entry_z| per open day
+            # inv_halflife: pair_weights = 1/HL (constant per pair, 0 when flat)
             w = pd.DataFrame(pair_weights).reindex_like(all_returns).fillna(0.0)
             w = w.where(all_returns != 0, 0.0)          # only weight open pairs
             wsum = w.sum(axis=1)
@@ -907,7 +981,7 @@ def run_one_month(
             ).fillna(0.0)
         else:
             raise ValueError(
-                f"unknown allocation {allocation!r}; expected 'equal' or 'zweight'"
+                f"unknown allocation {allocation!r}; expected 'equal', 'zweight', or 'inv_halflife'"
             )
 
     monthly_return = float((1 + daily_portfolio).prod() - 1)
@@ -956,7 +1030,8 @@ def run_backtest(
     cointegration_filter: bool = False,
     clusterer: Literal["optics", "hdbscan", "hierarchical"] = "optics",
     hedge_method: Literal["ols", "rlm"] = "ols",
-    allocation: Literal["equal", "zweight"] = "equal",
+    allocation: Literal["equal", "zweight", "inv_halflife"] = "equal",
+    top_k: int | None = None,
     realism: RealismConfig | None = None,
     style_factors: pd.DataFrame | None = None,
     carry_over: bool = False,
@@ -1068,6 +1143,7 @@ def run_backtest(
                 block_last_day_entry=block_last_day_entry,
                 delisting_fix=delisting_fix,
                 use_frozen_sigma=use_frozen_sigma,
+                top_k=top_k,
             )
         except ValueError as e:
             if verbose:
