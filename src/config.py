@@ -53,7 +53,7 @@ FORMATION_YEARS = 3        # rolling formation window for pair selection
 TRADING_MONTHS = 1         # rolling out-of-sample trading window
 ZSCORE_WINDOW_MONTHS = 6   # look-back for spread mean/std in the z-score
 ENTRY_THRESHOLD = 2.0      # |z| > 2 opens a position
-EXIT_THRESHOLD = 0.0       # z = 0 (zero-cross) closes the position (core variant)
+EXIT_THRESHOLD = -0.5      # |z| ≤ 0.5 closes the position (exits before full reversion)
 STOP_LOSS_SIGMA = None     # core = no stop; realism variant sets this to 3.5
 
 # --- Phase 5: position carry-over -------------------------------------------

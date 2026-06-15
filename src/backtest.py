@@ -25,6 +25,7 @@ Position convention (paper / Gatev-Goetzmann):
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -259,6 +260,67 @@ def get_delisting_returns(
 
 
 # ────────────────────────────────────────────────────────────────────────────────
+# IBES earnings blackout helper
+# ────────────────────────────────────────────────────────────────────────────────
+
+
+def load_ibes_earnings(data_dir: Path = DATA_DIR) -> pd.DataFrame:
+    """Load pre-fetched IBES earnings dates (ticker + earnings_date columns)."""
+    return pd.read_parquet(data_dir / "ibes_earnings.parquet")
+
+
+def _load_permno_ticker_map(data_dir: Path = DATA_DIR) -> pd.DataFrame:
+    """Load permno↔ticker mapping from crsp_spx_membership (has both columns)."""
+    mem = pd.read_parquet(data_dir / "crsp_spx_membership.parquet")
+    return mem[["permno", "ticker"]].dropna().drop_duplicates()
+
+
+def _build_permno_blackout(
+    ibes_df: pd.DataFrame,
+    date_index: pd.DatetimeIndex,
+    n_days: int,
+    data_dir: Path = DATA_DIR,
+) -> dict[int, frozenset]:
+    """Build {permno: frozenset[Timestamp]} of earnings blackout dates.
+
+    Joins IBES ticker-keyed earnings dates to CRSP permnos via the S&P 500
+    constituent membership table.  Blocks a symmetric ±n_days calendar-day
+    window around each announcement and returns only dates present in date_index.
+    """
+    mapping = _load_permno_ticker_map(data_dir)
+    merged = ibes_df.merge(mapping, on="ticker", how="inner")
+    if merged.empty:
+        return {}
+
+    date_arr = date_index.to_numpy()  # datetime64[ns]
+    blocked: dict[int, frozenset] = {}
+    for permno, grp in merged.groupby("permno"):
+        ann_arr = pd.DatetimeIndex(grp["earnings_date"]).to_numpy()
+        diff_days = (
+            np.abs(
+                date_arr[:, None].astype("int64") - ann_arr[None, :].astype("int64")
+            )
+            / 86_400_000_000_000  # nanoseconds → days
+        )
+        mask = (diff_days <= n_days).any(axis=1)
+        dates = frozenset(date_index[mask])
+        if dates:
+            blocked[int(permno)] = dates
+    return blocked
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# HMM regime helpers
+# ────────────────────────────────────────────────────────────────────────────────
+
+
+def load_regime_scale(data_dir: Path = DATA_DIR) -> pd.Series:
+    """Load pre-computed HMM regime scale (date-indexed, values in [0, 1])."""
+    df = pd.read_parquet(data_dir / "hmm_regimes.parquet")
+    return df["regime_scale"]
+
+
+# ────────────────────────────────────────────────────────────────────────────────
 # pair simulation
 # ────────────────────────────────────────────────────────────────────────────────
 
@@ -293,6 +355,10 @@ def simulate_pair_in_month(
     block_last_day_entry: bool = False,
     delisting_fix: bool = False,
     frozen_sigma: float | None = None,
+    entry_confirm: bool = False,
+    structural_exits: bool = False,
+    blackout: dict[int, frozenset] | None = None,
+    regime_scale: pd.Series | None = None,
 ) -> tuple[list[Trade], pd.Series, pd.Series, int, CarryState | None]:
     """Simulate ONE pair across ONE trading month.
 
@@ -413,6 +479,14 @@ def simulate_pair_in_month(
     # back inside the entry band. Always True when stop_cooldown=False.
     armed = True
 
+    # Feature 1: entry confirmation — track previous z for turning-point filter
+    prev_z: float = float("nan")
+    # Feature 3: structural break — 5-day rolling return buffers (one deque per leg)
+    recent_ret_a: deque = deque(maxlen=5)
+    recent_ret_b: deque = deque(maxlen=5)
+    # Feature 4: regime scale locked at trade entry; 1.0 = no scaling
+    entry_scale: float = 1.0
+
     for t in trading_dates:
         is_last_day = t == trading_dates[-1]
         close_a = float(prices_a.loc[t])
@@ -432,10 +506,15 @@ def simulate_pair_in_month(
                 ret_b = _delisting_day_return(ret_b, dlst_b[1], delisting_fix)
                 delist_today = True
             day_ret = _equal_dollar_daily_return(position, ret_a, ret_b)
+            day_ret *= entry_scale        # Feature 4: regime scale (locked at entry, 1.0 if off)
             day_ret -= borrow_daily       # borrow fee on the short leg (0 if frictionless)
             current_trade_pnl += day_ret  # accumulate gross P&L for this trade
             days_in_position += 1
             daily_weight.append(abs(entry_z))   # weight by entry dislocation
+            # Feature 3: feed rolling buffers for structural-break detection
+            if structural_exits:
+                recent_ret_a.append(ret_a)
+                recent_ret_b.append(ret_b)
         else:
             day_ret = 0.0
             daily_weight.append(0.0)
@@ -495,6 +574,7 @@ def simulate_pair_in_month(
             is_carried_position = False
             pending_entry = None
             pending_exit = None
+            prev_z = float(z_t)
             continue
 
         # stop-loss (realism variant only): z moved further against us
@@ -512,11 +592,14 @@ def simulate_pair_in_month(
                 is_carried_position = False
                 if stop_cooldown:
                     armed = False
+                recent_ret_a.clear()
+                recent_ret_b.clear()
             else:
                 pending_exit = ("stop_loss", float(z_t))
+            prev_z = float(z_t)
             continue
 
-        # reversion exit: z crossed back through zero
+        # reversion exit: z crossed back through zero (or ±0.5 with Feature 5)
         if position != 0 and pending_exit is None and position * float(z_t) >= exit_sigma:
             if execution_delay == 0:
                 _close_trade(t, float(z_t), "reversion")
@@ -524,34 +607,97 @@ def simulate_pair_in_month(
                 position = 0
                 current_trade_pnl = 0.0
                 is_carried_position = False
+                recent_ret_a.clear()
+                recent_ret_b.clear()
             else:
                 pending_exit = ("reversion", float(z_t))
+            prev_z = float(z_t)
             continue
+
+        # Feature 3: structural break exit — 5-day rolling correlation collapse
+        if structural_exits and position != 0 and pending_exit is None:
+            if len(recent_ret_a) >= 5:
+                c = np.corrcoef(list(recent_ret_a), list(recent_ret_b))[0, 1]
+                if np.isfinite(c) and c < 0.5:
+                    if execution_delay == 0:
+                        _close_trade(t, float(z_t), "reversion")
+                        daily_pnl[-1] -= _entry_exit_cost(t)
+                        position = 0
+                        current_trade_pnl = 0.0
+                        is_carried_position = False
+                        recent_ret_a.clear()
+                        recent_ret_b.clear()
+                    else:
+                        pending_exit = ("reversion", float(z_t))
+                    prev_z = float(z_t)
+                    continue
+
+        # Feature 2: earnings blackout exit — force-close if either leg enters window
+        if blackout and position != 0 and pending_exit is None:
+            if (t in blackout.get(permno_a, frozenset())
+                    or t in blackout.get(permno_b, frozenset())):
+                if execution_delay == 0:
+                    _close_trade(t, float(z_t), "reversion")
+                    daily_pnl[-1] -= _entry_exit_cost(t)
+                    position = 0
+                    current_trade_pnl = 0.0
+                    is_carried_position = False
+                    recent_ret_a.clear()
+                    recent_ret_b.clear()
+                else:
+                    pending_exit = ("reversion", float(z_t))
+                prev_z = float(z_t)
+                continue
 
         # entry (only if flat, armed, no pending action, and not blocked last-day)
         if position == 0 and pending_entry is None and pending_exit is None and armed:
             if block_last_day_entry and is_last_day:
                 pass    # D6.4: a last-day entry can never earn an in-month return
-            elif float(z_t) >= entry_sigma:
-                if execution_delay == 0:
-                    position = -1   # short spread
-                    entry_date = t
-                    entry_z = float(z_t)
-                    current_trade_pnl = 0.0          # fresh trade
-                    is_carried_position = False
-                    daily_pnl[-1] -= _entry_exit_cost(t)   # entry transaction cost
+            # Feature 2: earnings blackout — block new entries near announcements
+            elif blackout and (t in blackout.get(permno_a, frozenset())
+                               or t in blackout.get(permno_b, frozenset())):
+                pass    # skip entry; prev_z not updated so confirmation stays valid
+            else:
+                # Feature 1: entry confirmation — require z turning back toward zero
+                if entry_confirm:
+                    confirming_short = np.isfinite(prev_z) and float(z_t) < prev_z
+                    confirming_long  = np.isfinite(prev_z) and float(z_t) > prev_z
                 else:
-                    pending_entry = (-1, float(z_t))
-            elif float(z_t) <= -entry_sigma:
-                if execution_delay == 0:
-                    position = +1   # long spread
-                    entry_date = t
-                    entry_z = float(z_t)
-                    current_trade_pnl = 0.0          # fresh trade
-                    is_carried_position = False
-                    daily_pnl[-1] -= _entry_exit_cost(t)   # entry transaction cost
-                else:
-                    pending_entry = (+1, float(z_t))
+                    confirming_short = confirming_long = True
+
+                if float(z_t) >= entry_sigma and confirming_short:
+                    # Feature 4: lock regime scale at entry
+                    entry_scale = (
+                        float(regime_scale.loc[t])
+                        if regime_scale is not None and t in regime_scale.index
+                        else 1.0
+                    )
+                    if execution_delay == 0:
+                        position = -1   # short spread
+                        entry_date = t
+                        entry_z = float(z_t)
+                        current_trade_pnl = 0.0          # fresh trade
+                        is_carried_position = False
+                        daily_pnl[-1] -= _entry_exit_cost(t)   # entry transaction cost
+                    else:
+                        pending_entry = (-1, float(z_t))
+                elif float(z_t) <= -entry_sigma and confirming_long:
+                    # Feature 4: lock regime scale at entry
+                    entry_scale = (
+                        float(regime_scale.loc[t])
+                        if regime_scale is not None and t in regime_scale.index
+                        else 1.0
+                    )
+                    if execution_delay == 0:
+                        position = +1   # long spread
+                        entry_date = t
+                        entry_z = float(z_t)
+                        current_trade_pnl = 0.0          # fresh trade
+                        is_carried_position = False
+                        daily_pnl[-1] -= _entry_exit_cost(t)   # entry transaction cost
+                    else:
+                        pending_entry = (+1, float(z_t))
+        prev_z = float(z_t)
 
     # ── 3. month end: carry the position into next month, or force-close ──
     carry_out: CarryState | None = None
@@ -602,7 +748,7 @@ def run_one_month(
     metric: Literal["ssd", "pc", "factor"] = "ssd",
     cointegration_filter: bool = False,
     market_returns: pd.Series | None = None,
-    clusterer: Literal["optics", "hdbscan", "hierarchical"] = "optics",
+    clusterer: Literal["optics", "hdbscan", "hierarchical", "gg"] = "optics",
     hedge_method: Literal["ols", "rlm"] = "ols",
     allocation: Literal["equal", "zweight"] = "equal",
     realism: RealismConfig = RealismConfig(),
@@ -618,6 +764,15 @@ def run_one_month(
     block_last_day_entry: bool = False,
     delisting_fix: bool = False,
     use_frozen_sigma: bool = False,
+    entry_confirm: bool = False,
+    structural_exits: bool = False,
+    blackout_days: int = 0,
+    ibes_df: pd.DataFrame | None = None,
+    regime_scale: pd.Series | None = None,
+    top_k_pairs: int | None = None,
+    print_pairs: bool = False,
+    gg_top_n: int = 20,
+    gg_dist_floor: float = 0.0,
 ) -> MonthResult:
     """Run the full pipeline for one month.
 
@@ -688,26 +843,74 @@ def run_one_month(
             f"unknown metric {metric!r}; expected 'ssd', 'pc', or 'factor'"
         )
 
-    if clusterer == "optics":
-        labels = cluster_optics(
-            dmat,
-            min_samples=OPTICS_MIN_SAMPLES,
-            xi=xi,
-            min_cluster_size=OPTICS_MIN_CLUSTER_SIZE,
-        )
-    elif clusterer == "hdbscan":
-        labels = cluster_hdbscan(dmat, min_cluster_size=OPTICS_MIN_CLUSTER_SIZE)
-    elif clusterer == "hierarchical":
-        labels = cluster_hierarchical(
-            dmat, distance_quantile=HIER_QUANTILE, linkage=HIER_LINKAGE,
-            min_cluster_size=OPTICS_MIN_CLUSTER_SIZE,
-        )
+    if clusterer == "gg":
+        # Gatev-Goetzmann style: rank ALL possible pairs by SSD distance globally.
+        # No clustering — no sector awareness. Direct analog of the original paper.
+        # gg_dist_floor excludes trivially-perfect pairs (dual-class shares etc.)
+        # that have near-zero distance and almost never trigger z-score entries.
+        perms = list(dmat.index)
+        n = len(perms)
+        all_pairs: list[tuple] = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                a, b = perms[i], perms[j]
+                d = float(dmat.iloc[i, j])
+                if d >= gg_dist_floor:
+                    all_pairs.append((a, b, d))
+        all_pairs.sort(key=lambda x: x[2])
+        candidate_pairs = [(a, b) for a, b, _ in all_pairs[:gg_top_n]]
+        n_candidate_pairs_pre_filter = len(candidate_pairs)
     else:
-        raise ValueError(
-            f"unknown clusterer {clusterer!r}; expected 'optics', 'hdbscan', or 'hierarchical'"
+        if clusterer == "optics":
+            labels = cluster_optics(
+                dmat,
+                min_samples=OPTICS_MIN_SAMPLES,
+                xi=xi,
+                min_cluster_size=OPTICS_MIN_CLUSTER_SIZE,
+            )
+        elif clusterer == "hdbscan":
+            labels = cluster_hdbscan(dmat, min_cluster_size=OPTICS_MIN_CLUSTER_SIZE)
+        elif clusterer == "hierarchical":
+            labels = cluster_hierarchical(
+                dmat, distance_quantile=HIER_QUANTILE, linkage=HIER_LINKAGE,
+                min_cluster_size=OPTICS_MIN_CLUSTER_SIZE,
+            )
+        else:
+            raise ValueError(
+                f"unknown clusterer {clusterer!r}; expected 'optics', 'hdbscan', 'hierarchical', or 'gg'"
+            )
+        candidate_pairs = clusters_to_pairs(labels)
+        n_candidate_pairs_pre_filter = len(candidate_pairs)
+
+    # ── (optional) top-k by minimum distance ─────────────────────────────
+    # Gatev-Goetzmann (2006) use the 20 pairs with smallest SSD. When top_k_pairs
+    # is set, rank all within-cluster pairs by their formation-window distance and
+    # keep only the closest k. This concentrates exposure on the most cointegrated
+    # pairs and reduces pair count from 100-150 → k.
+    if top_k_pairs is not None and len(candidate_pairs) > top_k_pairs:
+        dm_vals = dmat  # square distance matrix, index/columns = permno
+        pair_dists = sorted(
+            candidate_pairs,
+            key=lambda p: float(dm_vals.loc[p[0], p[1]])
         )
-    candidate_pairs = clusters_to_pairs(labels)
-    n_candidate_pairs_pre_filter = len(candidate_pairs)
+        candidate_pairs = pair_dists[:top_k_pairs]
+
+    # ── (optional) print pairs for this month ────────────────────────────
+    if print_pairs and candidate_pairs:
+        from src.panel import ticker_lookup
+        tick = ticker_lookup(
+            permnos=[p for pair in candidate_pairs for p in pair],
+            crsp=crsp, as_of=formation_end,
+        )
+        n_show = min(len(candidate_pairs), top_k_pairs or len(candidate_pairs))
+        print(f"\n  [{trading_dates[0].date()} → {trading_dates[-1].date()}]  "
+              f"{n_show} candidate pairs (ranked by SSD distance):")
+        to_show = sorted(candidate_pairs, key=lambda p: float(dmat.loc[p[0], p[1]]))[:n_show]
+        for rank, (a, b) in enumerate(to_show, 1):
+            _ta = tick.get(a, a); ta = str(_ta.iloc[0] if hasattr(_ta, "iloc") else _ta)
+            _tb = tick.get(b, b); tb = str(_tb.iloc[0] if hasattr(_tb, "iloc") else _tb)
+            d = float(dmat.loc[a, b])
+            print(f"    {rank:3d}. {ta:<6s} / {tb:<6s}  (permno {a}/{b}, dist={d:.4f})")
 
     # ── (optional Phase 2) cointegration filter ───────────────────────────
     coint_results: dict[tuple[int, int], object] = {}
@@ -777,6 +980,13 @@ def run_one_month(
             pos = trading_dates.searchsorted(d, side="left")
             snapped[p] = (trading_dates[pos], r)
         delisting_events = snapped
+
+    # Feature 2: compute earnings blackout dict for this month's trading dates
+    blackout: dict[int, frozenset] = {}
+    if blackout_days > 0 and ibes_df is not None:
+        blackout = _build_permno_blackout(
+            ibes_df, trading_dates, blackout_days
+        )
 
     # ── fit γ for each pair and simulate ─────────────────────────────────
     trades: list[Trade] = []
@@ -853,6 +1063,8 @@ def run_one_month(
             execution_delay=execution_delay, stop_cooldown=stop_cooldown,
             block_last_day_entry=block_last_day_entry, delisting_fix=delisting_fix,
             frozen_sigma=pair_frozen_sigma,
+            entry_confirm=entry_confirm, structural_exits=structural_exits,
+            blackout=blackout or None, regime_scale=regime_scale,
         )
         if carry_out is not None:
             new_carry[key] = carry_out
@@ -951,7 +1163,7 @@ def run_backtest(
     market_returns: pd.Series | None = None,
     metric: Literal["ssd", "pc", "factor"] = "ssd",
     cointegration_filter: bool = False,
-    clusterer: Literal["optics", "hdbscan", "hierarchical"] = "optics",
+    clusterer: Literal["optics", "hdbscan", "hierarchical", "gg"] = "optics",
     hedge_method: Literal["ols", "rlm"] = "ols",
     allocation: Literal["equal", "zweight"] = "equal",
     realism: RealismConfig | None = None,
@@ -965,6 +1177,16 @@ def run_backtest(
     block_last_day_entry: bool = False,
     delisting_fix: bool = False,
     use_frozen_sigma: bool = False,
+    entry_confirm: bool = False,
+    structural_exits: bool = False,
+    blackout_days: int = 0,
+    ibes_df: pd.DataFrame | None = None,
+    use_regime_scale: bool = False,
+    regime_scale: pd.Series | None = None,
+    top_k_pairs: int | None = None,
+    print_pairs: bool = False,
+    gg_top_n: int = 20,
+    gg_dist_floor: float = 0.0,
     verbose: bool = True,
 ) -> tuple[pd.DataFrame, list[Trade]]:
     """Run the rolling monthly backtest.
@@ -1002,6 +1224,12 @@ def run_backtest(
         delisting_df = load_delisting()
     if zscore_window is None:
         zscore_window = ZSCORE_WINDOW_MONTHS * 21
+    # Feature 2: auto-load IBES if blackout requested
+    if blackout_days > 0 and ibes_df is None:
+        ibes_df = load_ibes_earnings()
+    # Feature 4: auto-load pre-computed regime scale if requested
+    if use_regime_scale and regime_scale is None:
+        regime_scale = load_regime_scale()
     if metric == "pc" and market_returns is None:
         market_returns = load_market_returns()
     if realism is None:
@@ -1065,6 +1293,15 @@ def run_backtest(
                 block_last_day_entry=block_last_day_entry,
                 delisting_fix=delisting_fix,
                 use_frozen_sigma=use_frozen_sigma,
+                entry_confirm=entry_confirm,
+                structural_exits=structural_exits,
+                blackout_days=blackout_days,
+                ibes_df=ibes_df,
+                regime_scale=regime_scale,
+                top_k_pairs=top_k_pairs,
+                print_pairs=print_pairs,
+                gg_top_n=gg_top_n,
+                gg_dist_floor=gg_dist_floor,
             )
         except ValueError as e:
             if verbose:
