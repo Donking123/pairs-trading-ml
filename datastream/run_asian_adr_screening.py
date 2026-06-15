@@ -38,7 +38,7 @@ Usage
         --as-of            2024-12-31
 
 Use ``--min-history-days`` to control the joint-history floor (default 504
-trading days ≈ 2 years per the paper's eligibility criteria).
+trading days ≈ 2 years per the strategy's eligibility criteria).
 """
 
 from __future__ import annotations
@@ -331,7 +331,7 @@ def roll_effective_spread(prices: pd.Series) -> float:
 
     Only finite if first-order autocov is negative (bid-ask bounce). When the
     autocov is positive, Roll's estimator is undefined; we return the |cov|
-    version as in the spec snippet — it's a conservative cost proxy.
+    version — it's a conservative cost proxy.
     """
     rets = prices.pct_change().dropna().values
     if len(rets) < 3:
@@ -613,7 +613,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--kc", type=float, default=0.0, help="exit multiplier")
     p.add_argument("--cointegration-alpha", type=float, default=0.05)
     p.add_argument("--min-history-days", type=int, default=504,
-                   help="~2 trading years (paper minimum eligibility)")
+                   help="~2 trading years (minimum eligibility)")
     p.add_argument("--min-non-zero-return-pct", type=float, default=0.50)
     p.add_argument("--max-zero-return-pct-adr", type=float, default=0.50)
     return p.parse_args(argv)

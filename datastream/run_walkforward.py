@@ -3,7 +3,7 @@
 run_walkforward.py
 ==================
 
-Out-of-sample (walk-forward) evaluation of the Hong & Susmel (2013) Asian ADR
+Out-of-sample (walk-forward) evaluation of the Asian ADR
 pairs strategy.
 
 Why this exists
@@ -199,6 +199,7 @@ def run_fold(
         pair_trades = _bt.backtest_pair(
             pair, df, start=test_start, end=test_end,
             max_overnight_gap_days=cfg.get("max_overnight_gap", 4),
+            cost_per_side=cfg.get("cost_bps", 0.0) / 1e4,
         )
         trades.extend(pair_trades)
 
@@ -249,6 +250,19 @@ def _build_panel(
             loc_open_adj = _bt._adj_prices(loc_raw, "open").rename("local_open")
             df = df.join(loc_open_adj, how="left")
             df["local_open_usd"] = df["local_open"] * df["fx_mid"]
+
+        # carry the (cleaned) adjustment factors so backtest_pair can flag trades
+        # whose window straddles a corporate action — identical to load_panel.
+        # Without these columns spans_adj_change is always False and the OOS path
+        # silently keeps the split/redenomination trades that run_backtest drops.
+        adr_af = _bt._adj_factor_series(adr_raw)
+        loc_af = _bt._adj_factor_series(loc_raw)
+        if adr_af is not None:
+            adr_af = adr_af[~adr_af.index.duplicated(keep="last")]
+            df["adr_adj_factor"] = adr_af.reindex(df.index).ffill().fillna(1.0)
+        if loc_af is not None:
+            loc_af = loc_af[~loc_af.index.duplicated(keep="last")]
+            df["local_adj_factor"] = loc_af.reindex(df.index).ffill().fillna(1.0)
 
         panel[pair.pair_id] = df
     return panel
@@ -303,6 +317,16 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    dest="max_overnight_gap",
                    help="skip two-bar fills where next joint bar is more than this "
                         "many calendar days after the ADR short day")
+    p.add_argument("--cost-bps", type=float, default=0.0, dest="cost_bps",
+                   help="incremental transaction cost in bps PER SIDE PER LEG "
+                        "(slippage/impact on top of the registry's Roll spread); "
+                        "a round-trip pair trade pays this on all 4 fills "
+                        "(matches run_backtest.py --cost-bps; previously the OOS "
+                        "path applied no incremental cost)")
+    p.add_argument("--keep-adj-change", action="store_true", dest="keep_adj_change",
+                   help="keep (rather than drop) trades whose window straddles an "
+                        "adj_factor change; trades remain flagged via spans_adj_change "
+                        "either way (matches run_backtest.py; default: drop)")
     return p.parse_args(argv)
 
 
@@ -327,6 +351,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "min_non_zero_return_pct": args.min_non_zero_return_pct,
         "max_zero_return_pct_adr": args.max_zero_return_pct_adr,
         "max_overnight_gap": args.max_overnight_gap,
+        "cost_bps": args.cost_bps,
     }
 
     folds = build_folds(args.train_start, args.split, args.test_end, args.folds)
@@ -334,20 +359,34 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     all_trades: list = []
     fold_records: list[dict] = []
+    n_flagged_total = 0
+    n_dropped_total = 0
     for k, (tr_start, tr_end, te_end) in enumerate(folds):
         trades, approved = run_fold(
             k, tr_start, tr_end, te_end,
             adr_prices, adr_reference, global_prices, fx_rates, cfg,
         )
-        all_trades.extend(trades)
-        closed = [t for t in trades if not t.was_aborted]
+        # Defensive backstop (mirrors run_backtest.main): drop trades whose window
+        # straddles an adj_factor change unless --keep-adj-change is set. Applied
+        # per fold so both the fold stats below and the aggregate use the same
+        # filtered set.
+        n_flagged = sum(t.spans_adj_change for t in trades)
+        if args.keep_adj_change:
+            kept = trades
+        else:
+            kept = [t for t in trades if not t.spans_adj_change]
+        n_flagged_total += n_flagged
+        n_dropped_total += len(trades) - len(kept)
+
+        all_trades.extend(kept)
+        closed = [t for t in kept if not t.was_aborted]
         fold_records.append({
             "fold": k,
             "train_start": tr_start.isoformat(),
             "train_end": tr_end.isoformat(),
             "test_end": te_end.isoformat(),
             "n_pairs_selected": len(approved),
-            "n_trades": len(trades),
+            "n_trades": len(kept),
             "n_closed": len(closed),
             "median_ruce_net": (round(float(np.median([t.ruce_net for t in closed])), 6)
                                 if closed else None),
@@ -359,7 +398,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     report = _bt.build_report(all_trades, [], cfg)
     report["summary"]["evaluation"] = "out_of_sample_walkforward"
     report["summary"]["n_folds"] = len(folds)
+    report["summary"]["n_adj_change_flagged"] = int(n_flagged_total)
+    report["summary"]["n_adj_change_dropped"] = int(n_dropped_total)
     report["folds"] = fold_records
+    log.info("adj_factor backstop: flagged %d, %s %d trades spanning a corporate action",
+             n_flagged_total,
+             "kept" if args.keep_adj_change else "dropped",
+             n_dropped_total)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "summary.json").write_text(
@@ -385,7 +430,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                  fr["fold"], fr["n_pairs_selected"], fr["n_trades"],
                  fr["median_ruce_net"])
     log.info("=" * 72)
-    log.info("DISTRIBUTION (paper Table 7-B format)\n%s",
+    log.info("DISTRIBUTION\n%s",
              _bt.format_distribution_table(report["distribution"]))
     log.info("results in %s", args.out_dir)
     return 0

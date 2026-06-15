@@ -4,7 +4,7 @@ This guide gives the **exact order** to run the scripts that reproduce the resul
 verified in the health check (in-sample backtest, walk-forward out-of-sample
 validation, and the data-quality / robustness review suite).
 
-The strategy implements the Hong & Susmel (2013) Asian ADR pairs trade:
+The strategy implements the Asian ADR pairs trade:
 short the ADR when its dollar spread over the FX-converted local share is wide,
 buy the local leg next session, and unwind on convergence (ROCE / RUCE).
 
@@ -107,7 +107,7 @@ python3 datastream/run_asian_adr_screening.py \
 ## 4. In-sample backtest
 
 Trades **all approved pairs over their full history**. This reproduces the
-headline ROCE / RUCE distribution (paper Table 7-B format). It is *optimistic*
+headline ROCE / RUCE distribution. It is *optimistic*
 (pairs are selected on the same history they are traded on) — use Step 5 for the
 unbiased number.
 

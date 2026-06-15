@@ -1,6 +1,6 @@
 # ADR Pairs Strategy — Research Results
 
-Hong & Susmel (2013) Asian ADR pairs trading, evaluated on Datastream data 2011–2026.
+Asian ADR pairs trading, evaluated on Datastream data 2011–2026.
 
 **Run date:** 2026-06-11 | **Engine:** `datastream/run_research_permutations.py` + `review/portfolio.py`
 
@@ -175,7 +175,7 @@ Every single year is profitable across all 36 parameter combinations.
 |------|-------------|
 | [data/backtest/research_runs.csv](data/backtest/research_runs.csv) | All 1,080 runs — full stats per row |
 | [data/backtest/best_permutations.csv](data/backtest/best_permutations.csv) | Ranked permutations |
-| [data/backtest/table_7_style_summary.csv](data/backtest/table_7_style_summary.csv) | Paper Table 7-B style aggregation |
+| [data/backtest/distribution_summary.csv](data/backtest/distribution_summary.csv) | Distribution summary aggregation |
 | [data/backtest/portfolio_daily_mtm_equity.csv](data/backtest/portfolio_daily_mtm_equity.csv) | Daily equity curve (MTM) |
 | [data/backtest/all_trades_by_run.csv](data/backtest/all_trades_by_run.csv) | All individual trades with run_id |
 
@@ -205,8 +205,6 @@ python datastream/run_research_permutations.py ... --full-grid
 ---
 
 ## Strategy Reference
-
-Hong, H., & Susmel, R. (2013). *Pairs-trading in the Asian ADR market*. Working paper, University of Houston.
 
 - Spread: `spread_t = P_ADR,t − (P_local,t × FX_t) / adr_ratio`
 - ADR ratio is a structural constant — never OLS-estimated

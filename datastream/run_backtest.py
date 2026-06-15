@@ -3,7 +3,7 @@
 run_backtest.py
 ===============
 
-End-to-end backtest of the Hong & Susmel (2013) Asian ADR pairs strategy.
+End-to-end backtest of the Asian ADR pairs strategy.
 
 The script implements the entire signal -> sequencer -> ROCE/RUCE pipeline
 inline (single-file) so it stays runnable without `src/asian_adr/`. The logic
@@ -451,14 +451,24 @@ def backtest_pair(
                     i += 1
                     continue
 
-                spread_d1 = spreads[j]
+                # Issue 3: the local leg fills at the D+1 Asia OPEN (realistic
+                # Asia-open fill); fall back to close if open prices are
+                # unavailable or NaN.
+                _loc_px = (local_open_usd[j]
+                           if local_open_usd is not None
+                           and not np.isnan(local_open_usd[j])
+                           else local_usd[j])
+                # Look-ahead fix: re-check the spread with information ACTUALLY
+                # available at the D+1 Asia open. The freshest ADR mark at that
+                # moment is the PRIOR U.S. close adr_close[i] (the D+1 U.S. close
+                # prints ~13h later), and the local leg is priced at its D+1 open.
+                # The previous code compared spreads[j] = adr_close[j] - ... to
+                # kappa_close, which embedded adr_close[D+1] — a price that does
+                # not exist yet when this fill is made (a ~13h look-ahead on the
+                # abort/proceed decision). The threshold remains the day-D signal's
+                # kappa_close (mu/sigma as of day D, when the ADR was shorted).
+                spread_d1 = float(adr_close[i]) - float(_loc_px) / pair.adr_ratio
                 if spread_d1 > kappa_close:
-                    # Issue 3: BUY local at D+1 OPEN (realistic Asia-open fill).
-                    # Fall back to close if open prices are unavailable or NaN.
-                    _loc_px = (local_open_usd[j]
-                               if local_open_usd is not None
-                               and not np.isnan(local_open_usd[j])
-                               else local_usd[j])
                     loc_open_eff = float(_loc_px) * (1.0 + loc_side)
                     state.position             = HSPosition.OPEN
                     state.local_open_price_usd = loc_open_eff
@@ -615,7 +625,7 @@ def backtest_pair(
 
 
 # -----------------------------------------------------------------------------
-# Aggregation & paper Table 7-B-style distribution
+# Aggregation & distribution summary
 # -----------------------------------------------------------------------------
 DIST_PCTILES = [("mean", None), ("std", None), ("max", 1.0),
                 ("p90", 0.90), ("p75", 0.75), ("median", 0.50),
@@ -623,7 +633,7 @@ DIST_PCTILES = [("mean", None), ("std", None), ("max", 1.0),
 
 
 def distribution_row(name: str, values: np.ndarray) -> dict:
-    """Compute the paper Table 7-B distribution stats for a metric."""
+    """Compute the distribution stats for a metric."""
     if len(values) == 0:
         return {"metric": name} | {k: float("nan") for k, _ in DIST_PCTILES}
     arr = np.asarray(values, dtype=float)
@@ -721,7 +731,7 @@ def format_distribution_table(dist: list[dict]) -> str:
 # -----------------------------------------------------------------------------
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Backtest the Hong & Susmel Asian ADR pairs strategy.",
+        description="Backtest the Asian ADR pairs strategy.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--adr-prices",    type=Path, default=Path("datastream/data/parquet/adr/adr_prices.parquet"))
@@ -821,7 +831,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if k != "config":
             log.info("  %-22s %s", k, v)
     log.info("=" * 72)
-    log.info("DISTRIBUTION (paper Table 7-B format)\n%s", table)
+    log.info("DISTRIBUTION\n%s", table)
     log.info("=" * 72)
     log.info("results in %s", args.out_dir)
     return 0

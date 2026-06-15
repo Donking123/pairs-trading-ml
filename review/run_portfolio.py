@@ -97,7 +97,16 @@ def load_trades(path: Path) -> pd.DataFrame:
     if path.suffix == ".parquet":
         df = pd.read_parquet(path)
     else:
-        df = pd.read_csv(path)
+        # Force ticker/id columns to string: numeric-looking tickers (e.g.
+        # "932939") are otherwise inferred as int64 on read and then fail to
+        # match the parquet's string `ticker` column, so the MTM panel reports
+        # "missing price series" and silently drops the pair. This only bit
+        # small all-numeric pair subsets (e.g. a high liquidity floor leaving a
+        # handful of numeric tickers); mixed sets stayed object-typed by luck.
+        # Reading as str also preserves any leading zeros. dtype keys absent
+        # from the file are ignored by pandas.
+        df = pd.read_csv(path, dtype={"pair_id": str, "adr_ticker": str,
+                                      "underlying_ticker": str})
     df["close_date"] = pd.to_datetime(df["close_date"])
     if "open_date" in df.columns:
         df["open_date"] = pd.to_datetime(df["open_date"])

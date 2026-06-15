@@ -3,8 +3,8 @@
 run_param_grid.py
 =================
 
-Parameter-robustness study for the Hong & Susmel (2013) Asian ADR pairs
-strategy. Sweeps the (k0, kc, T, H) grid the paper tests and reports the
+Parameter-robustness study for the Asian ADR pairs
+strategy. Sweeps the (k0, kc, T, H) parameter grid and reports the
 out-of-sample median RUCE-net (and other stats) per grid cell, so the result
 can be shown not to depend on a single lucky parameter pick.
 
@@ -17,7 +17,7 @@ By default the sweep is **out-of-sample**: pairs are re-selected on the train
 window for each (T, H) combination (selection depends on T/H but not on the
 entry/exit thresholds), then traded on the test window. Pass ``--in-sample`` to
 sweep over the whole history using a fixed pre-selected pair registry instead
-(faster, but optimistic — use only as a sanity check against the paper).
+(faster, but optimistic — use only as a sanity check).
 
 Output is a tidy ``grid_results.csv`` (one row per cell) plus pivoted heatmap
 CSVs (median RUCE-net as a function of each parameter pair).

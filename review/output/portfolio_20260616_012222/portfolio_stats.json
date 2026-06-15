@@ -1,0 +1,23 @@
+{
+  "n_days": 1253,
+  "n_active_days": 1155,
+  "total_return": 1.928824,
+  "annualised_return": 0.240678,
+  "annualised_vol": 0.077215,
+  "rf": 0.0,
+  "sharpe": 2.8386,
+  "sharpe_nw": 3.4762,
+  "nw_lags": 7,
+  "sortino": 4.0694,
+  "max_drawdown": -0.052247,
+  "calmar": 4.6065,
+  "hit_rate": 0.5602,
+  "final_equity": 2.928824,
+  "metric": "roce_net",
+  "weight": "equal",
+  "return_mode": "mark_to_market",
+  "mtm_trades_marked": 1393,
+  "mtm_trades_unmatched": 84,
+  "mtm_coverage": 0.9431,
+  "mtm_local_timing": "synchronous_open_d+1"
+}

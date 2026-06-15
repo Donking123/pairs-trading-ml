@@ -3,7 +3,7 @@
 run_research_permutations.py
 ============================
 
-Rolling train/test research runner for the Hong & Susmel (2013) Asian ADR
+Rolling train/test research runner for the Asian ADR
 pairs strategy.  Sweeps multiple train/test windows and parameter combinations,
 saves every permutation's result, then ranks by out-of-sample performance.
 
@@ -65,12 +65,15 @@ log = logging.getLogger("research")
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DATASTREAM = _REPO_ROOT / "datastream"
 
-# Default data paths (actual location in repo)
-_DEFAULT_ADR     = _REPO_ROOT / "data/parquet/adr_prices.parquet"
-_DEFAULT_GLOBAL  = _REPO_ROOT / "data/parquet/global_prices.parquet"
-_DEFAULT_FX      = _REPO_ROOT / "data/parquet/fx_rates.parquet"
+# Default data paths — match the on-disk layout written by the fetch scripts and
+# used by run_backtest.py (datastream/data/parquet/<asset>/...). The previous
+# defaults pointed at data/parquet/<file>.parquet, which does not exist in this
+# repo, so a no-arg run failed the existence check in main().
+_DEFAULT_ADR     = _DATASTREAM / "data/parquet/adr/adr_prices.parquet"
+_DEFAULT_GLOBAL  = _DATASTREAM / "data/parquet/global/global_prices.parquet"
+_DEFAULT_FX      = _DATASTREAM / "data/parquet/fx/fx_rates.parquet"
 _DEFAULT_PAIRS   = _REPO_ROOT / "config/pairs/asian_adr_pairs.json"
-_DEFAULT_OUT     = _REPO_ROOT / "data/backtest"
+_DEFAULT_OUT     = _DATASTREAM / "data/backtest"
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +158,8 @@ def generate_rolling_windows(
 # ---------------------------------------------------------------------------
 def build_param_grid(full: bool = False) -> list[dict]:
     """
-    ``full=False``  → standard grid (paper's core range; fast).
-    ``full=True``   → extended grid covering the paper's full (k0,kc,T,H) space.
+    ``full=False``  → standard grid (core range; fast).
+    ``full=True``   → extended grid covering the full (k0,kc,T,H) space.
     """
     if full:
         T_vals  = [30, 60, 90, 120]
@@ -304,6 +307,8 @@ def run_research(
     windows:            list[dict],
     param_grid:         list[dict],
     max_overnight_gap:  int = 4,
+    cost_per_side:      float = 0.0,
+    keep_adj_change:    bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """
     Build price panel (once), then run all (window, params) permutations.
@@ -377,8 +382,15 @@ def run_research(
                     start=test_start,
                     end=test_end,
                     max_overnight_gap_days=max_overnight_gap,
+                    cost_per_side=cost_per_side,
                 )
                 run_trades.extend(pair_trades)
+
+            # Defensive backstop (mirrors run_backtest.main / run_walkforward.main):
+            # drop trades whose window straddles a corporate action so spurious
+            # split/redenomination returns can't contaminate the score or ranking.
+            if not keep_adj_change:
+                run_trades = [t for t in run_trades if not t.spans_adj_change]
 
             rec = _run_stats(run_trades, eligible_pairs, meta)
             rec["score"] = compute_score(rec)
@@ -418,7 +430,7 @@ def run_research(
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
-def _table7(run_records: list[dict]) -> pd.DataFrame:
+def _distribution_summary(run_records: list[dict]) -> pd.DataFrame:
     rows = []
     for r in run_records:
         rows.append({
@@ -529,7 +541,7 @@ def _safe_json(obj):
 # ---------------------------------------------------------------------------
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Rolling train/test research runner — Hong & Susmel ADR strategy.",
+        description="Rolling train/test research runner — Asian ADR strategy.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--adr-prices",    type=Path, default=_DEFAULT_ADR)
@@ -550,6 +562,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Use full (T, k0, kc, H) grid — slower but more comprehensive",
     )
     p.add_argument("--max-overnight-gap", type=int, default=4)
+    p.add_argument("--cost-bps", type=float, default=0.0, dest="cost_bps",
+                   help="incremental per-side-per-leg transaction cost in bps "
+                        "(slippage/impact on top of the registry Roll spread), "
+                        "passed to the backtest; default 0 matches run_backtest.py. "
+                        "Non-zero penalises high-churn parameter sets in the ranking.")
+    p.add_argument("--keep-adj-change", action="store_true", dest="keep_adj_change",
+                   help="keep (rather than drop) trades whose window straddles a "
+                        "corporate action; default drops them, matching "
+                        "run_backtest.py / run_walkforward.py")
     p.add_argument("--top-n",            type=int, default=10)
     return p.parse_args(argv)
 
@@ -626,6 +647,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         windows=windows,
         param_grid=param_grid,
         max_overnight_gap=args.max_overnight_gap,
+        cost_per_side=args.cost_bps / 1e4,
+        keep_adj_change=args.keep_adj_change,
     )
     elapsed = (datetime.now() - t0).total_seconds()
     log.info("Completed in %.1f s (%.1f min)", elapsed, elapsed / 60)
@@ -646,9 +669,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     with (args.out_dir / "research_runs.json").open("w") as fh:
         json.dump(run_records, fh, indent=2, default=_safe_json)
 
-    t7 = _table7(run_records)
-    t7.to_csv(args.out_dir / "table_7_style_summary.csv",  index=False)
-    t7.to_csv(args.out_dir / "research_summary_table.csv", index=False)
+    dist_summary = _distribution_summary(run_records)
+    dist_summary.to_csv(args.out_dir / "distribution_summary.csv",   index=False)
+    dist_summary.to_csv(args.out_dir / "research_summary_table.csv", index=False)
 
     best_df = _best_perm(run_records, top_n=args.top_n)
     best_df.to_csv(args.out_dir / "best_permutations.csv", index=False)
