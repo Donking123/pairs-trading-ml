@@ -35,7 +35,7 @@ from pathlib import Path
 import pandas as pd
 import wrds
 
-from config import COMMON_SHARE_CODES, DATA_DIR, END_DATE, START_DATE
+from src.config import COMMON_SHARE_CODES, DATA_DIR, END_DATE, START_DATE
 
 
 # --------------------------------------------------------------------------- #
