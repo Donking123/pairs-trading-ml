@@ -35,7 +35,7 @@ from pathlib import Path
 import pandas as pd
 import wrds
 
-from src.config import COMMON_SHARE_CODES, DATA_DIR, END_DATE, START_DATE
+from config import COMMON_SHARE_CODES, DATA_DIR, END_DATE, START_DATE
 
 
 # --------------------------------------------------------------------------- #
@@ -115,6 +115,76 @@ def get_sp500_index(db, start=START_DATE, end=END_DATE) -> pd.DataFrame:
         params={"start": start, "end": end},
         date_cols=["caldt"],
     )
+
+
+def get_hmm_features(db, permnos, start=START_DATE, end=END_DATE) -> pd.DataFrame:
+    """Lightweight HMM feature pull — two daily scalars, no wide price matrix.
+
+    Returns a DataFrame with columns:
+      sp500_ret : daily S&P 500 index return (sprtrn from crsp.dsp500)
+      disp      : cross-sectional std of constituent daily returns (STDDEV aggregated in SQL)
+
+    These two series are all regime_hmm.py needs. Storing only the aggregated
+    scalars avoids shipping the full 450-stock × N-day price matrix locally.
+    """
+    permno_list = ", ".join(str(int(p)) for p in sorted(set(permnos)))
+
+    idx = db.raw_sql(
+        """
+        SELECT caldt AS date, sprtrn AS sp500_ret
+        FROM crsp.dsp500
+        WHERE caldt BETWEEN %(start)s AND %(end)s
+        """,
+        params={"start": start, "end": end},
+        date_cols=["date"],
+    ).set_index("date")
+
+    disp = db.raw_sql(
+        f"""
+        SELECT date, STDDEV(ret) AS disp
+        FROM crsp.dsf
+        WHERE permno IN ({permno_list})
+          AND date BETWEEN %(start)s AND %(end)s
+          AND ret IS NOT NULL
+        GROUP BY date
+        ORDER BY date
+        """,
+        params={"start": start, "end": end},
+        date_cols=["date"],
+    ).set_index("date")
+
+    return idx.join(disp, how="inner").dropna()
+
+
+def get_hmm_features_v2(db, permnos, start=START_DATE, end=END_DATE) -> pd.DataFrame:
+    """CIZ / v2 equivalent of get_hmm_features — same output schema."""
+    permno_list = ", ".join(str(int(p)) for p in sorted(set(permnos)))
+
+    idx = db.raw_sql(
+        """
+        SELECT caldt AS date, sprtrn AS sp500_ret
+        FROM crsp.dsp500_v2
+        WHERE caldt BETWEEN %(start)s AND %(end)s
+        """,
+        params={"start": start, "end": end},
+        date_cols=["date"],
+    ).set_index("date")
+
+    disp = db.raw_sql(
+        f"""
+        SELECT dlycaldt AS date, STDDEV(dlyret) AS disp
+        FROM crsp.wrds_dsfv2_query
+        WHERE permno IN ({permno_list})
+          AND dlycaldt BETWEEN %(start)s AND %(end)s
+          AND dlyret IS NOT NULL
+        GROUP BY dlycaldt
+        ORDER BY dlycaldt
+        """,
+        params={"start": start, "end": end},
+        date_cols=["date"],
+    ).set_index("date")
+
+    return idx.join(disp, how="inner").dropna()
 
 
 def get_ff_factors(db, start=START_DATE, end=END_DATE) -> pd.DataFrame:
@@ -280,6 +350,10 @@ def main(start: str = START_DATE, end: str = END_DATE, data_dir: Path = DATA_DIR
             print("[4/5] S&P 500 index (v2) ...")
             get_sp500_index_v2(db, start, end).to_parquet(
                 data_dir / "sp500_index.parquet")
+
+            print("[5/6] HMM features — S&P 500 return + cross-sectional dispersion (v2) ...")
+            get_hmm_features_v2(db, permnos, start, end).to_parquet(
+                data_dir / "hmm_features.parquet")
         else:
             print("[1/5] S&P 500 constituents ...")
             constituents = get_sp500_constituents(db, start, end)
@@ -299,10 +373,14 @@ def main(start: str = START_DATE, end: str = END_DATE, data_dir: Path = DATA_DIR
             print("[3/5] Delisting events ...")
             get_delisting(db, permnos).to_parquet(data_dir / "delisting.parquet")
 
-            print("[4/5] S&P 500 index ...")
+            print("[4/6] S&P 500 index ...")
             get_sp500_index(db, start, end).to_parquet(data_dir / "sp500_index.parquet")
 
-        print("[5/5] Fama-French factors ...")
+            print("[5/6] HMM features — S&P 500 return + cross-sectional dispersion ...")
+            get_hmm_features(db, permnos, start, end).to_parquet(
+                data_dir / "hmm_features.parquet")
+
+        print("[6/6] Fama-French factors ...")
         get_ff_factors(db, start, end).to_parquet(data_dir / "ff_factors.parquet")
     finally:
         db.close()
