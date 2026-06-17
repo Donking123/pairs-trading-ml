@@ -145,7 +145,7 @@ class PairState:
 # -----------------------------------------------------------------------------
 def load_pairs(path: Path) -> list[Pair]:
     if not path.exists():
-        log.error("pair registry not found: %s — run run_asian_adr_screening.py first", path)
+        log.error("pair registry not found: %s — expected the committed registry at this path", path)
         sys.exit(2)
     raw = json.loads(path.read_text())
     pairs = []

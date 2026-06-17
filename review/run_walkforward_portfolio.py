@@ -85,7 +85,8 @@ def _load_module(name: str, path: Path):
 
 _pf = _load_module("review_portfolio", Path(__file__).resolve().parent / "run_portfolio.py")
 _bt = _load_module("ds_run_backtest", _DATASTREAM / "run_backtest.py")
-_screen = _load_module("ds_screening", _DATASTREAM / "run_asian_adr_screening.py")
+# the adr_ratio estimator (_bulk_estimate_ratios) now lives in run_walkforward
+_screen = _load_module("ds_walkforward_wfp", _DATASTREAM / "run_walkforward.py")
 
 
 def _read_parquet(path: Path) -> pd.DataFrame:
@@ -231,6 +232,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="walk-forward run directory containing trades_oos.csv "
                         "(auto-discovers the latest under "
                         "datastream/data/walkforward_output if omitted)")
+    p.add_argument("--by-floor", type=Path, default=None,
+                   help="root dir holding floor_<label>/trades_oos.csv subdirs "
+                        "(from 'run_walkforward.py --floors'); build a persistent "
+                        "equity_curve.csv + portfolio_stats.json in each and print a "
+                        "per-floor summary table. Overrides --wf-dir/--trades.")
     p.add_argument("--trades", type=Path, default=None,
                    help="explicit trades_oos.csv path (overrides --wf-dir)")
     p.add_argument("--metric", default="roce_net",
@@ -266,26 +272,32 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    args = parse_args(argv)
+def _floor_sort_key(name: str) -> int:
+    """Numeric ordering for a ``floor_<label>`` dir name (none < 50k < 250k < 1M)."""
+    lab = name.replace("floor_", "")
+    if lab == "none":
+        return 0
+    mult = 1
+    if lab.endswith("M"):
+        mult, lab = 1_000_000, lab[:-1]
+    elif lab.endswith("k"):
+        mult, lab = 1_000, lab[:-1]
+    try:
+        return int(float(lab) * mult)
+    except ValueError:
+        return 0
 
-    # --- resolve the trades file + run dir ------------------------------------
-    if args.trades is not None:
-        trades_path = args.trades
-        wf_dir = trades_path.parent
-    else:
-        wf_dir = args.wf_dir or find_latest_wf_dir()
-        if wf_dir is None:
-            log.error("no walk-forward run found under %s — pass --wf-dir or --trades",
-                      _WF_ROOT)
-            return 2
-        trades_path = wf_dir / "trades_oos.csv"
+
+def run_portfolio_for_dir(
+    args: argparse.Namespace, wf_dir: Path, trades_path: Path, out_dir: Path,
+) -> Optional[dict]:
+    """Build the OOS portfolio tearsheet for a single walk-forward dir: load the
+    trades, construct the daily return series (full-coverage MTM or lumped), and
+    write ``equity_curve.csv`` / ``rolling_sharpe.csv`` / ``portfolio_stats.json``
+    into ``out_dir``. Returns the portfolio-stats dict (or ``None`` on failure)."""
     if not trades_path.exists():
         log.error("trades file not found: %s", trades_path)
-        return 2
-
-    out_dir = args.out_dir or wf_dir
-    log.info("walk-forward run dir: %s", wf_dir)
+        return None
 
     # surface the OOS context recorded by run_walkforward.py, if present
     wf_summary = {}
@@ -362,7 +374,62 @@ def main(argv: Optional[list[str]] = None) -> int:
         log.info("  %-22s %s", k, v)
     log.info("=" * 60)
     log.info("wrote equity_curve.csv + portfolio_stats.json to %s", out_dir)
-    return 0
+    return stats
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(argv)
+
+    # --- by-floor mode: one persistent equity curve per liquidity floor -------
+    # Iterate the floor_<label>/ subdirs written by run_walkforward.py --floors
+    # and print a per-floor summary table (folded in from run_walkforward_by_floor.py).
+    if args.by_floor is not None:
+        root = args.by_floor
+        floor_dirs = sorted(
+            (p.parent for p in root.glob("floor_*/trades_oos.csv")),
+            key=lambda p: _floor_sort_key(p.name),
+        )
+        if not floor_dirs:
+            log.error("no floor_*/trades_oos.csv under %s — run "
+                      "'run_walkforward.py --floors' first", root)
+            return 2
+        rows: list[dict] = []
+        for sub in floor_dirs:
+            log.info("===== %s =====", sub.name)
+            stats = run_portfolio_for_dir(args, sub, sub / "trades_oos.csv", sub)
+            if stats:
+                rows.append({
+                    "share_floor": sub.name.replace("floor_", ""),
+                    "n_trades_total": stats.get("n_trades_total"),
+                    "sharpe": stats.get("sharpe"),
+                    "annualised_return": stats.get("annualised_return"),
+                    "max_drawdown": stats.get("max_drawdown"),
+                    "mtm_coverage": stats.get("mtm_coverage"),
+                })
+        if rows:
+            log.info("=" * 72)
+            log.info("EQUITY CURVES BY FLOOR (metric=%s)", args.metric)
+            log.info("\n%s", pd.DataFrame(rows).to_string(index=False))
+            log.info("=" * 72)
+            log.info("equity curves under %s", root)
+        return 0
+
+    # --- single-dir mode: resolve the trades file + run dir -------------------
+    if args.trades is not None:
+        trades_path = args.trades
+        wf_dir = trades_path.parent
+    else:
+        wf_dir = args.wf_dir or find_latest_wf_dir()
+        if wf_dir is None:
+            log.error("no walk-forward run found under %s — pass --wf-dir or --trades",
+                      _WF_ROOT)
+            return 2
+        trades_path = wf_dir / "trades_oos.csv"
+
+    out_dir = args.out_dir or wf_dir
+    log.info("walk-forward run dir: %s", wf_dir)
+    stats = run_portfolio_for_dir(args, wf_dir, trades_path, out_dir)
+    return 0 if stats is not None else 2
 
 
 if __name__ == "__main__":

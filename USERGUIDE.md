@@ -80,27 +80,16 @@ Exit codes: `0` healthy · `1` degraded (warnings only) · `2` failed.
 
 ---
 
-## 3. Pair screening — build the registry
+## 3. Pair screening — the registry
 
-Selects tradable pairs (cointegration via ADF + Phillips–Perron, liquidity
-filters, Roll effective-spread estimate) and writes the pair registry that every
-downstream script consumes.
+Tradable pairs are selected by the screening engine (cointegration via ADF +
+Phillips–Perron, liquidity filters, Roll effective-spread estimate). The approved
+**pair registry `config/pairs/asian_adr_pairs.json` ships pre-built** (~224 pairs)
+and every downstream script consumes it directly — no build step is required.
 
-```bash
-python3 datastream/run_asian_adr_screening.py \
-    --adr-prices    datastream/data/parquet/adr/adr_prices.parquet \
-    --adr-reference datastream/data/parquet/adr/adr_reference.parquet \
-    --global-prices datastream/data/parquet/global/global_prices.parquet \
-    --fx-rates      datastream/data/parquet/fx/fx_rates.parquet \
-    --out           config/pairs/asian_adr_pairs.json \
-    --as-of         2026-04-30
-```
-
-**Output:** `config/pairs/asian_adr_pairs.json` — the approved pair registry
-(ships pre-built with ~224 pairs; re-running overwrites it).
-
-> The repo already includes a built registry, so you may skip this step if you
-> only want to reproduce the backtest on the shipped pairs.
+The screening logic now lives inside `datastream/run_walkforward.py`
+(`run_pipeline`), where the walk-forward re-runs it on each train window to select
+pairs out-of-sample. (There is no longer a standalone screening CLI.)
 
 ---
 

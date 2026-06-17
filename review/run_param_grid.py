@@ -72,9 +72,10 @@ def _load_module(name: str, path: Path):
     return mod
 
 
-_screen = _load_module("ds_screening", _DATASTREAM / "run_asian_adr_screening.py")
 _bt = _load_module("ds_backtest", _DATASTREAM / "run_backtest.py")
 _wf = _load_module("research_walkforward", _DATASTREAM / "run_walkforward.py")
+# the screening engine (run_pipeline, _load_or_die, ...) now lives in run_walkforward
+_screen = _wf
 
 
 # -----------------------------------------------------------------------------

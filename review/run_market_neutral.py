@@ -82,8 +82,9 @@ def _load_module(name: str, path: Path):
     return mod
 
 
-_port = _load_module("research_portfolio", _REPO_ROOT / "review" / "portfolio.py")
-_screen = _load_module("ds_screening_mn", _DATASTREAM / "run_asian_adr_screening.py")
+_port = _load_module("research_portfolio", _REPO_ROOT / "review" / "run_portfolio.py")
+# the screening engine + parquet loader (_load_or_die) now live in run_walkforward
+_screen = _load_module("ds_walkforward_mn", _DATASTREAM / "run_walkforward.py")
 
 
 # -----------------------------------------------------------------------------

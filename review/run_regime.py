@@ -107,7 +107,8 @@ def _load_module(name: str, path: Path):
     return mod
 
 
-_screen = _load_module("ds_screening_regime", _DATASTREAM / "run_asian_adr_screening.py")
+# the screening engine + parquet loader (_load_or_die) now live in run_walkforward
+_screen = _load_module("ds_walkforward_regime", _DATASTREAM / "run_walkforward.py")
 
 
 # -----------------------------------------------------------------------------

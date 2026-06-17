@@ -102,10 +102,10 @@ def fmt_floor(v: int) -> str:
 
 
 def load_data():
-    adr = _wf._screen._load_or_die(_DATASTREAM / "data/parquet/adr/adr_prices.parquet", "ADR prices")
-    ref = _wf._screen._load_or_die(_DATASTREAM / "data/parquet/adr/adr_reference.parquet", "ADR reference")
-    glb = _wf._screen._load_or_die(_DATASTREAM / "data/parquet/global/global_prices.parquet", "Global prices")
-    fx = _wf._screen._load_or_die(_DATASTREAM / "data/parquet/fx/fx_rates.parquet", "FX rates")
+    adr = _wf._load_or_die(_DATASTREAM / "data/parquet/adr/adr_prices.parquet", "ADR prices")
+    ref = _wf._load_or_die(_DATASTREAM / "data/parquet/adr/adr_reference.parquet", "ADR reference")
+    glb = _wf._load_or_die(_DATASTREAM / "data/parquet/global/global_prices.parquet", "Global prices")
+    fx = _wf._load_or_die(_DATASTREAM / "data/parquet/fx/fx_rates.parquet", "FX rates")
     fx = fx.copy()
     fx["date"] = pd.to_datetime(fx["date"]).dt.normalize()
     return adr, ref, glb, fx
