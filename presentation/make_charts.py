@@ -27,7 +27,9 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyArrowPatch, Rectangle
+import matplotlib.dates as mdates
+import matplotlib.colors as mcolors
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Polygon, Rectangle
 from matplotlib.ticker import FuncFormatter
 
 # --------------------------------------------------------------------------- #
@@ -104,25 +106,46 @@ RED = "#b2182b"       # losses / before
 BLUE = "#2166ac"      # ADR leg
 ORANGE = "#d6604d"
 NAVY = "#1a2e44"
+INK = "#16222e"       # primary text / headings
+SLATE = "#33495e"     # axis labels / secondary text
+HAIR = "#9aa6b1"      # spines, gridlines, rules
 
+# A single house font (matches the polished walk-forward schematic) applied to
+# every chart so the deck reads as one coherent set. Helvetica Neue ships with
+# macOS; the fallbacks keep the script portable.
 plt.rcParams.update({
     "figure.figsize": (12.8, 7.2),   # 16:9
-    "figure.dpi": 170,
-    "savefig.dpi": 170,
+    "figure.dpi": 200,
+    "savefig.dpi": 200,
     "savefig.bbox": "tight",
+    "savefig.facecolor": "white",
+    "figure.facecolor": "white",
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
     "font.size": 16,
     "axes.titlesize": 21,
     "axes.titleweight": "bold",
-    "axes.labelsize": 17,
+    "axes.titlecolor": INK,
+    "axes.titlepad": 14,
+    "axes.labelsize": 16,
+    "axes.labelcolor": SLATE,
+    "axes.edgecolor": HAIR,
+    "axes.linewidth": 1.0,
+    "text.color": INK,
     "axes.spines.top": False,
     "axes.spines.right": False,
     "axes.grid": True,
-    "grid.alpha": 0.25,
+    "axes.axisbelow": True,
+    "grid.alpha": 0.5,
+    "grid.color": HAIR,
     "grid.linestyle": "-",
-    "legend.fontsize": 15,
+    "grid.linewidth": 0.6,
+    "legend.fontsize": 14,
     "legend.frameon": False,
-    "xtick.labelsize": 14,
-    "ytick.labelsize": 14,
+    "xtick.labelsize": 13,
+    "ytick.labelsize": 13,
+    "xtick.color": SLATE,
+    "ytick.color": SLATE,
 })
 
 PCT = FuncFormatter(lambda x, _: f"{x*100:.0f}%")
@@ -138,6 +161,47 @@ def _save(fig, name):
 
 def _footnote(fig, text):
     fig.text(0.005, 0.005, text, fontsize=10, color=GREY, ha="left", va="bottom")
+
+
+def _header(ax, title, subtitle):
+    """Left-aligned executive header: bold INK headline above an italic muted
+    'so-what' subtitle. Matches the polished walk-forward schematic (chart 04)
+    and reads like an FT/Economist exhibit. Call after plotting; pair with
+    `fig.subplots_adjust(top=...)` to reserve room above the axes."""
+    ax.set_title("")  # suppress the default centred title
+    ax.text(0.0, 1.155, title, transform=ax.transAxes, ha="left", va="top",
+            fontsize=22, fontweight="bold", color=INK)
+    ax.text(0.0, 1.055, subtitle, transform=ax.transAxes, ha="left", va="top",
+            fontsize=13.5, color=SLATE, style="italic")
+
+
+def _area_gradient(ax, x, y, color, base, alpha=0.42):
+    """Soft vertical gradient fill between curve `y` and the horizontal `base`,
+    saturated at the curve edge and fading to transparent toward the base — a
+    cleaner, more premium look than a flat alpha fill."""
+    xn = mdates.date2num(pd.to_datetime(x))
+    y = np.asarray(y, dtype=float)
+    lo, hi = min(base, np.nanmin(y)), max(base, np.nanmax(y))
+    grad = np.empty((256, 1, 4))
+    grad[:, :, :3] = mcolors.to_rgb(color)
+    above = np.nanmean(y) >= base
+    ramp = np.linspace(0.0, alpha, 256) if above else np.linspace(alpha, 0.0, 256)
+    grad[:, :, 3] = ramp[:, None]
+    im = ax.imshow(grad, aspect="auto", origin="lower",
+                   extent=[xn.min(), xn.max(), lo, hi], zorder=1.2)
+    verts = np.column_stack([np.concatenate([xn, xn[::-1]]),
+                             np.concatenate([y, np.full_like(y, base)])])
+    poly = Polygon(verts, closed=True, facecolor="none", edgecolor="none")
+    ax.add_patch(poly)
+    im.set_clip_path(poly)
+    return im
+
+
+def _year_axis(ax):
+    """Clean yearly x-ticks for the OOS date axis."""
+    ax.xaxis.set_major_locator(mdates.YearLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax.margins(x=0.01)
 
 
 def _load_json(path):
@@ -224,9 +288,9 @@ def chart_timeline():
             fontsize=11, color=GREY, style="italic")
 
     steps = [
-        (1.4, "1. ADR premium > μ + k₀σ\n→ SHORT the ADR\n(at US close)", BLUE),
-        (5.1, "2. Spread still wide?\n→ BUY local share\n(at Asia open)\nNow market-neutral", GREEN),
-        (8.6, "3. Spread reverts < μ\n→ COVER ADR + SELL local\n→ book ROCE / RUCE", NAVY),
+        (1.4, "1. ADR premium > μ + k₀σ\n$\\rightarrow$ SHORT the ADR\n(at US close)", BLUE),
+        (5.1, "2. Spread still wide?\n$\\rightarrow$ BUY local share\n(at Asia open)\nNow market-neutral", GREEN),
+        (8.6, "3. Spread reverts < μ\n$\\rightarrow$ COVER ADR + SELL local\n$\\rightarrow$ book ROCE / RUCE", NAVY),
     ]
     for x, txt, c in steps:
         ax.annotate("", xy=(x, 4.1), xytext=(x, 3.4),
@@ -335,25 +399,26 @@ def chart_spread_example():
 # 03 — Universe breakdown
 # --------------------------------------------------------------------------- #
 def chart_universe():
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.4, 6.6))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.4, 7.0))
     byx = PAIRS["underlying_exchange"].value_counts()
-    ax1.barh(byx.index[::-1], byx.values[::-1], color=GREEN)
-    for i, v in enumerate(byx.values[::-1]):
-        ax1.text(v + 1, i, str(v), va="center", fontsize=12)
-    ax1.set_title("Approved pairs by exchange")
+    b1 = ax1.barh(byx.index[::-1], byx.values[::-1], color=GREEN)
+    ax1.bar_label(b1, padding=4, fontsize=12, color=SLATE, fontweight="bold")
+    ax1.set_title("By underlying exchange", fontsize=16, color=SLATE)
     ax1.set_xlabel("number of pairs")
+    ax1.margins(x=0.12)
     ax1.grid(axis="y", visible=False)
 
     byc = PAIRS["underlying_currency"].value_counts()
-    ax2.barh(byc.index[::-1], byc.values[::-1], color=BLUE)
-    for i, v in enumerate(byc.values[::-1]):
-        ax2.text(v + 1, i, str(v), va="center", fontsize=12)
-    ax2.set_title("Approved pairs by currency")
+    b2 = ax2.barh(byc.index[::-1], byc.values[::-1], color=BLUE)
+    ax2.bar_label(b2, padding=4, fontsize=12, color=SLATE, fontweight="bold")
+    ax2.set_title("By underlying currency", fontsize=16, color=SLATE)
     ax2.set_xlabel("number of pairs")
+    ax2.margins(x=0.12)
     ax2.grid(axis="y", visible=False)
 
     fig.suptitle(f"Tradable universe — {len(PAIRS)} cointegration-screened Asian ADR pairs",
-                 fontsize=19, fontweight="bold")
+                 fontsize=20, fontweight="bold", color=INK, y=0.99)
+    fig.subplots_adjust(top=0.84, wspace=0.25)
     _footnote(fig, "Source: config/pairs/asian_adr_pairs.json (screened ADF/PP p<0.05, liquidity & stale-price filters).")
     _save(fig, "03_universe_breakdown.png")
 
@@ -362,54 +427,145 @@ def chart_universe():
 # 04 — Walk-forward schematic
 # --------------------------------------------------------------------------- #
 def chart_walkforward():
-    fig, ax = plt.subplots(figsize=(13.0, 5.2))
-    ax.set_xlim(2010, 2026)
-    ax.set_ylim(0, 3)
-    ax.add_patch(Rectangle((2010, 1.2), 11, 0.8, facecolor=GREY, alpha=0.55))
-    ax.text(2015.5, 1.6, "TRAIN  (2010–2020)\nscreen & select cointegrated pairs",
-            ha="center", va="center", color="white", fontsize=14, fontweight="bold")
-    ax.add_patch(Rectangle((2021, 1.2), 5, 0.8, facecolor=GREEN, alpha=0.9))
-    ax.text(2023.5, 1.6, "TEST  (2021–2025)\ntrade out-of-sample",
-            ha="center", va="center", color="white", fontsize=14, fontweight="bold")
-    ax.annotate("", xy=(2021, 0.95), xytext=(2021, 1.18),
-                arrowprops=dict(arrowstyle="-", color=NAVY, lw=1.5))
-    ax.text(2021, 0.7, "selection cut-off\n(no look-ahead)", ha="center", va="top", fontsize=12, color=NAVY)
-    ax.text(2017, 2.55,
-            "Pairs are chosen only from data the strategy could have seen; "
-            "every reported number is from the untouched 2021–2025 test window.",
-            ha="center", fontsize=12.5, color=GREY, style="italic")
-    ax.set_yticks([])
-    ax.set_xticks(range(2010, 2027, 2))
-    ax.set_title("Walk-forward design — guards against curve-fitting")
-    ax.grid(axis="y", visible=False)
-    _save(fig, "04_walkforward_schematic.png")
+    # Executive schematic (data-independent). Clean rounded blocks, a clear
+    # "no look-ahead" cut-off, and a time ruler — styled for a C-suite deck.
+    SLATE = "#33495e"     # selection window
+    INK = "#16222e"       # headings / arrow
+    AMBER = "#c8801b"     # the no-look-ahead cut-off
+    X0, X1 = 2009.2, 2026.8
+    with plt.rc_context({"font.family": "Helvetica Neue"}):
+        fig, ax = plt.subplots(figsize=(13.2, 5.9))
+        ax.set_xlim(X0, X1)
+        ax.set_ylim(0, 3.5)
+        ax.axis("off")
+
+        bar_y, bar_h = 1.42, 0.88
+        x_train = (2010.0, 2020.78)
+        x_test = (2021.22, 2026.0)
+
+        def rbox(x0, x1, fc):
+            ax.add_patch(FancyBboxPatch(
+                (x0, bar_y), x1 - x0, bar_h,
+                boxstyle="round,pad=0,rounding_size=0.14", mutation_aspect=2.7,
+                facecolor=fc, edgecolor="none", zorder=3))
+
+        rbox(*x_train, SLATE)
+        rbox(*x_test, GREEN)
+
+        cxt, cxe = sum(x_train) / 2, sum(x_test) / 2
+        ax.text(cxt, bar_y + bar_h * 0.63, "TRAIN", ha="center", va="center",
+                color="white", fontsize=23, fontweight="bold", zorder=4)
+        ax.text(cxt, bar_y + bar_h * 0.28, "2010 – 2020", ha="center", va="center",
+                color="#d9e0e7", fontsize=15, fontweight="bold", zorder=4)
+        ax.text(cxt, bar_y - 0.27, "Selection window  ·  screen & select cointegrated pairs",
+                ha="center", va="top", color=SLATE, fontsize=12.5, zorder=4)
+
+        ax.text(cxe, bar_y + bar_h * 0.63, "TEST", ha="center", va="center",
+                color="white", fontsize=23, fontweight="bold", zorder=4)
+        ax.text(cxe, bar_y + bar_h * 0.28, "2021 – 2025", ha="center", va="center",
+                color="#e6f1ea", fontsize=15, fontweight="bold", zorder=4)
+        ax.text(cxe, bar_y - 0.27, "Evaluation window  ·  trade out-of-sample",
+                ha="center", va="top", color=GREEN, fontsize=12.5, fontweight="bold", zorder=4)
+
+        # carry-forward arrow bridging the two windows
+        xc = (x_train[1] + x_test[0]) / 2
+        ax.add_patch(FancyArrowPatch(
+            (2019.4, bar_y + bar_h + 0.12), (2022.9, bar_y + bar_h + 0.12),
+            connectionstyle="arc3,rad=-0.28", arrowstyle="-|>",
+            mutation_scale=26, lw=2.4, color=INK, zorder=5))
+        ax.text(xc, bar_y + bar_h + 0.70, "selected pairs traded forward",
+                ha="center", va="bottom", fontsize=12.5, color=INK, style="italic", zorder=5)
+
+        # no-look-ahead cut-off divider
+        ax.plot([xc, xc], [0.98, bar_y + bar_h + 0.02], color=AMBER, lw=2.2,
+                ls=(0, (4, 3)), zorder=2)
+        ax.scatter([xc], [0.98], s=70, marker="D", color=AMBER, zorder=6)
+        ax.text(xc, 0.66, "selection cut-off — NO LOOK-AHEAD", ha="center", va="top",
+                fontsize=12.5, fontweight="bold", color=AMBER)
+
+        # time ruler
+        ax.annotate("", xy=(X1 - 0.3, 0.98), xytext=(X0 + 0.3, 0.98),
+                    arrowprops=dict(arrowstyle="-", color="#9aa6b1", lw=1.4))
+        for yr in range(2010, 2027, 2):
+            ax.plot([yr, yr], [0.93, 0.98], color="#9aa6b1", lw=1.2)
+            ax.text(yr, 0.82, str(yr), ha="center", va="top", fontsize=11.5, color=GREY)
+
+        # title + subtitle
+        ax.text(0.5, 1.02, "Walk-forward design — built to prevent curve-fitting",
+                transform=ax.transAxes, ha="center", va="bottom",
+                fontsize=23, fontweight="bold", color=INK)
+        ax.text((X0 + X1) / 2, 3.18,
+                "Pairs are chosen only from data the strategy could have seen; "
+                "every reported number comes from the untouched 2021–2025 window.",
+                ha="center", va="center", fontsize=13, color=GREY, style="italic")
+
+        _save(fig, "04_walkforward_schematic.png")
 
 
 # --------------------------------------------------------------------------- #
 # 05 — Equity curve
 # --------------------------------------------------------------------------- #
 def chart_equity():
-    fig, ax = plt.subplots()
-    end = EQ["equity"].iloc[-1]
-    series_color = GREEN if end >= 1.0 else RED
-    fill_color = GREEN_L if end >= 1.0 else "#f4a582"
-    ax.plot(EQ["date"], EQ["equity"], color=series_color, lw=2.4)
-    ax.fill_between(EQ["date"], 1.0, EQ["equity"], color=fill_color, alpha=0.15)
-    ax.axhline(1.0, color=GREY, lw=1, ls="--")
-    ax.scatter([EQ["date"].iloc[-1]], [end], color=series_color, zorder=5)
-    ax.annotate(f"${end:.3f}\n({(end-1)*100:+.0f}%)",
-                xy=(EQ["date"].iloc[-1], end),
-                xytext=(-10, -40), textcoords="offset points",
-                ha="right", fontsize=15, fontweight="bold", color=series_color)
-    ax.set_title("Growth of $1 — out-of-sample, 2021–2025 (daily mark-to-market, net of costs)")
-    ax.set_ylabel("equity (per $1 invested)")
-    txt = (f"Total {PSTATS['total_return']*100:+.1f}%   ·   "
-           f"Annualised {PSTATS['annualised_return']*100:+.1f}%   ·   "
-           f"Sharpe {PSTATS['sharpe']:.2f}   ·   MaxDD {PSTATS['max_drawdown']*100:.1f}%")
-    ax.text(0.02, 0.95, txt, transform=ax.transAxes, fontsize=13,
-            va="top", bbox=dict(boxstyle="round,pad=0.4", fc="#f2f7f3", ec=GREEN))
-    _footnote(fig, SRC_TAG + "  ROCE-net (unlevered), equal-weighted across concurrent positions.")
-    _save(fig, "05_equity_curve.png")
+    with plt.rc_context({"font.family": "Helvetica Neue"}):
+        fig, ax = plt.subplots(figsize=(13.2, 7.0))
+        fig.subplots_adjust(top=0.84, left=0.075, right=0.965, bottom=0.12)
+        end = EQ["equity"].iloc[-1]
+        up = end >= 1.0
+        series_color = GREEN if up else RED
+        fill_color = GREEN if up else RED
+
+        _area_gradient(ax, EQ["date"], EQ["equity"], fill_color, base=1.0)
+        ax.plot(EQ["date"], EQ["equity"], color=series_color, lw=2.6, zorder=4,
+                solid_capstyle="round")
+        ax.axhline(1.0, color=HAIR, lw=1.2, ls=(0, (4, 3)), zorder=2)
+
+        # end-point callout
+        last_date = EQ["date"].iloc[-1]
+        ax.scatter([last_date], [end], s=70, color=series_color, zorder=6,
+                   edgecolor="white", linewidth=1.6)
+        ax.annotate(f"\\${end:.2f}", xy=(last_date, end),
+                    xytext=(-10, 14), textcoords="offset points",
+                    ha="right", va="bottom", fontsize=20, fontweight="bold",
+                    color=series_color)
+        ax.annotate(f"{(end-1)*100:+.0f}% on \\$1", xy=(last_date, end),
+                    xytext=(-10, 2), textcoords="offset points",
+                    ha="right", va="top", fontsize=13, color=SLATE)
+
+        # executive header
+        _header(ax,
+                "Growth of \\$1 — Out-of-Sample, 2021–2025",
+                "Net of costs, daily mark-to-market on the untouched 2021–2025 window — "
+                f"\\$1 compounds to \\${end:.2f}.")
+
+        # KPI ribbon (top-left interior is empty for a rising curve)
+        kpis = [("Total return", f"{PSTATS['total_return']*100:+.0f}%"),
+                ("Annualised", f"{PSTATS['annualised_return']*100:+.1f}%"),
+                ("Sharpe", f"{PSTATS['sharpe']:.2f}"),
+                ("Max drawdown", f"{PSTATS['max_drawdown']*100:.1f}%")]
+        x0, n, w, gap = 0.022, len(kpis), 0.158, 0.012
+        for i, (lab, val) in enumerate(kpis):
+            x = x0 + i * (w + gap)
+            ax.add_patch(FancyBboxPatch(
+                (x, 0.80), w, 0.155, transform=ax.transAxes,
+                boxstyle="round,pad=0,rounding_size=0.018", mutation_aspect=1,
+                facecolor="#f2f7f3", edgecolor=GREEN, lw=1.2, zorder=7))
+            ax.text(x + w / 2, 0.905, val, transform=ax.transAxes, ha="center",
+                    va="center", fontsize=17, fontweight="bold", color=INK, zorder=8)
+            ax.text(x + w / 2, 0.832, lab, transform=ax.transAxes, ha="center",
+                    va="center", fontsize=10.5, color=SLATE, zorder=8)
+
+        ax.set_ylabel("Equity (Per \\$1 invested)")
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"\\${v:.1f}"))
+        _year_axis(ax)
+        # pad the right so the end-point callout never clips, and the left so
+        # the first (2021) year tick is visible
+        ax.set_xlim(EQ["date"].iloc[0] - pd.Timedelta(days=20),
+                    last_date + pd.Timedelta(days=70))
+        ax.grid(False)
+        for s in ("left", "bottom"):
+            ax.spines[s].set_color(HAIR)
+        _footnote(fig, SRC_TAG + "  ROCE-net (unlevered), equal-weighted across concurrent positions.")
+        _save(fig, "05_equity_curve.png")
 
 
 # --------------------------------------------------------------------------- #
@@ -418,20 +574,41 @@ def chart_equity():
 def chart_drawdown():
     eq = EQ.copy()
     eq["dd"] = eq["equity"] / eq["equity"].cummax() - 1.0
-    fig, ax = plt.subplots()
-    ax.fill_between(eq["date"], eq["dd"], 0, color=RED, alpha=0.35)
-    ax.plot(eq["date"], eq["dd"], color=RED, lw=1.4)
-    trough = eq.loc[eq["dd"].idxmin()]
-    ax.scatter([trough["date"]], [trough["dd"]], color=RED, zorder=5)
-    ax.annotate(f"max drawdown {trough['dd']*100:.1f}%",
-                xy=(trough["date"], trough["dd"]),
-                xytext=(10, 12), textcoords="offset points",
-                fontsize=14, fontweight="bold", color=RED)
-    ax.yaxis.set_major_formatter(PCT)
-    ax.set_title("Drawdown profile — shallow and quick to recover")
-    ax.set_ylabel("drawdown from peak")
-    _footnote(fig, SRC_TAG + f"  Calmar (ann.return/|MaxDD|) = {PSTATS['calmar']:.2f}.")
-    _save(fig, "06_drawdown_underwater.png")
+    with plt.rc_context({"font.family": "Helvetica Neue"}):
+        fig, ax = plt.subplots(figsize=(13.2, 7.0))
+        fig.subplots_adjust(top=0.84, left=0.075, right=0.965, bottom=0.12)
+
+        _area_gradient(ax, eq["date"], eq["dd"], RED, base=0.0, alpha=0.40)
+        ax.plot(eq["date"], eq["dd"], color=RED, lw=2.0, zorder=4,
+                solid_capstyle="round")
+        ax.axhline(0, color=HAIR, lw=1.2, zorder=2)
+
+        trough = eq.loc[eq["dd"].idxmin()]
+        ax.scatter([trough["date"]], [trough["dd"]], s=70, color=RED, zorder=6,
+                   edgecolor="white", linewidth=1.6)
+        ax.annotate(f"max drawdown {trough['dd']*100:.1f}%",
+                    xy=(trough["date"], trough["dd"]),
+                    xytext=(14, 10), textcoords="offset points",
+                    fontsize=14, fontweight="bold", color=RED,
+                    bbox=dict(boxstyle="round,pad=0.4", fc="#fbf3f3", ec=RED, lw=1.2),
+                    arrowprops=dict(arrowstyle="-", color=RED, lw=1.2))
+
+        _header(ax,
+                "Drawdown profile — Shallow and quick to recover",
+                f"Worst peak-to-trough loss is just {trough['dd']*100:.1f}%; "
+                f"Calmar (annual return ÷ |max drawdown|) = {PSTATS['calmar']:.2f}.")
+
+        ax.yaxis.set_major_formatter(PCT)
+        ax.set_ylabel("Drawdown from peak")
+        ax.set_ylim(eq["dd"].min() * 1.18, 0.004)
+        _year_axis(ax)
+        ax.set_xlim(eq["date"].iloc[0] - pd.Timedelta(days=20),
+                    eq["date"].iloc[-1] + pd.Timedelta(days=20))
+        ax.grid(False)
+        for s in ("left", "bottom"):
+            ax.spines[s].set_color(HAIR)
+        _footnote(fig, SRC_TAG + f"  Calmar (ann.return/|MaxDD|) = {PSTATS['calmar']:.2f}.")
+        _save(fig, "06_drawdown_underwater.png")
 
 
 # --------------------------------------------------------------------------- #
@@ -557,40 +734,65 @@ def chart_leg_attribution():
     closed = TRADES[TRADES["close_reason"] != "overnight_abort"]
     legs = [("ADR short leg", closed["adr_return"], BLUE),
             ("Local long leg", closed["local_return"], GREY)]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.2, 6.4))
     names = [l[0] for l in legs]
     meds = [l[1].median() for l in legs]
     wins = [(l[1] > 0).mean() for l in legs]
     cols = [l[2] for l in legs]
 
-    b1 = ax1.bar(names, [m * 100 for m in meds], color=cols, width=0.6)
-    ax1.axhline(0, color=GREY, lw=1)
-    ax1.set_title("Median return per leg", fontsize=16)
-    ax1.set_ylabel("median per-trade return (%)")
-    span = max(abs(m) for m in meds) * 100
-    ax1.set_ylim(-span * 1.4, span * 1.4)
-    for b, m in zip(b1, meds):
-        y = m * 100
-        ax1.text(b.get_x() + b.get_width()/2, y + (0.06 * span if m >= 0 else -0.06 * span),
-                 f"{m*100:+.2f}%", ha="center",
-                 va="bottom" if m >= 0 else "top",
-                 fontsize=15, fontweight="bold")
+    with plt.rc_context({"font.family": "Helvetica Neue"}):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.2, 7.0))
+        fig.subplots_adjust(top=0.78, bottom=0.10, left=0.07, right=0.965, wspace=0.26)
 
-    b2 = ax2.bar(names, [w * 100 for w in wins], color=cols, width=0.6)
-    ax2.axhline(50, color=RED, lw=1.4, ls="--", label="coin-flip 50%")
-    ax2.set_title("Win rate per leg", fontsize=16)
-    ax2.set_ylabel("% of trades profitable")
-    ax2.set_ylim(0, 100)
-    ax2.legend(loc="upper right")
-    for b, w in zip(b2, wins):
-        ax2.text(b.get_x() + b.get_width()/2, w*100 + 1.5,
-                 f"{w*100:.0f}%", ha="center", fontsize=15, fontweight="bold")
+        # figure-level executive header (matches _header on single-axis charts)
+        fig.text(0.07, 0.955, "Where the alpha lives — the ADR short is the edge",
+                 ha="left", va="top", fontsize=22, fontweight="bold", color=INK)
+        fig.text(0.07, 0.888,
+                 "The overpriced-ADR short carries the return and wins "
+                 f"{wins[0]*100:.0f}% of the time; the local leg is a near-flat market hedge.",
+                 ha="left", va="top", fontsize=13.5, color=SLATE, style="italic")
 
-    fig.suptitle("Where the alpha lives — the ADR short is the edge; the local leg is a hedge",
-                 fontsize=17, fontweight="bold", y=1.0)
-    fig.subplots_adjust(top=0.80)
-    _footnote(fig, SRC_TAG + "  Closed (round-trip) trades only.")
-    _save(fig, "10_leg_attribution.png")
+        # --- Panel A: median return per leg ---
+        b1 = ax1.bar(names, [m * 100 for m in meds], color=cols, width=0.55,
+                     zorder=3)
+        ax1.axhline(0, color=HAIR, lw=1.2, zorder=2)
+        ax1.set_title("Median return per leg", fontsize=16, color=SLATE,
+                      fontweight="bold", pad=10)
+        ax1.set_ylabel("median per-trade return (%)")
+        span = max(abs(m) for m in meds) * 100
+        ax1.set_ylim(-span * 1.45, span * 1.45)
+        for b, m in zip(b1, meds):
+            y = m * 100
+            ax1.text(b.get_x() + b.get_width()/2,
+                     y + (0.07 * span if m >= 0 else -0.07 * span),
+                     f"{m*100:+.2f}%", ha="center",
+                     va="bottom" if m >= 0 else "top",
+                     fontsize=17, fontweight="bold",
+                     color=GREEN if m >= 0 else RED)
+
+        # --- Panel B: win rate per leg ---
+        b2 = ax2.bar(names, [w * 100 for w in wins], color=cols, width=0.55,
+                     zorder=3)
+        ax2.axhline(50, color=RED, lw=1.6, ls=(0, (4, 3)), zorder=4)
+        ax2.text(1.48, 50, "coin-flip 50%", ha="right", va="bottom",
+                 fontsize=12, color=RED, fontweight="bold")
+        ax2.set_title("Win rate per leg", fontsize=16, color=SLATE,
+                      fontweight="bold", pad=10)
+        ax2.set_ylabel("% of trades profitable")
+        ax2.set_ylim(0, 100)
+        for b, w in zip(b2, wins):
+            ax2.text(b.get_x() + b.get_width()/2, w*100 + 2.2,
+                     f"{w*100:.0f}%", ha="center", fontsize=17, fontweight="bold",
+                     color=INK)
+
+        for ax in (ax1, ax2):
+            ax.grid(False)
+            ax.margins(x=0.18)
+            for s in ("left", "bottom"):
+                ax.spines[s].set_color(HAIR)
+            ax.tick_params(labelsize=13)
+
+        _footnote(fig, SRC_TAG + "  Closed (round-trip) trades only.")
+        _save(fig, "10_leg_attribution.png")
 
 
 # --------------------------------------------------------------------------- #
@@ -780,7 +982,7 @@ def chart_top_contributors():
     n_pos = int((a["sum"] > 0).sum())
     ax.text(0.97, 0.06,
             f"Top 8 ≈ {top['share'].sum():.0f}% of '24–25 gains · {n_pos} pairs positive overall\n"
-            "Most are UNSPONSORED OTC ADRs → big modeled convergences may not\n"
+            "Most are UNSPONSORED OTC ADRs $\\rightarrow$ big modeled convergences may not\n"
             "be capturable at size. Validate real bid/ask + impact before trading.",
             transform=ax.transAxes, ha="right", va="bottom", fontsize=11,
             bbox=dict(boxstyle="round,pad=0.5", fc="#fbf3f3", ec=RED))
